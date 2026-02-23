@@ -1,10 +1,14 @@
-# Ryze AI Chatbot - Backend Dependencies
+# BioVLM Chatbot - Backend Dependencies
 
 # Web framework
 fastapi>=0.100.0
 uvicorn[standard]>=0.23.0
 python-multipart>=0.0.6
 pydantic>=2.0.0
+
+# OpenAI SDK for GPT integration
+openai>=1.0.0
+httpx>=0.25.0
 
 # ServerlessLLM (install separately)
 # pip install serverless-llm serverless-llm-store

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Ryze AI Chatbot - Quick Start Script
+# BioVLM Chatbot - Quick Start Script
 
 set -e
 
@@ -15,8 +15,8 @@ NC='\033[0m' # No Color
 echo -e "${PURPLE}"
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║                                                              ║"
-echo "║   🚀 Ryze AI Chatbot                                        ║"
-echo "║   Powered by ServerlessLLM + Qwen3-VL-8B-GRPO               ║"
+echo "║   🚀 BioVLM Chatbot                                         ║"
+echo "║   Powered by ServerlessLLM + BioVLM-8B-GRPO                ║"
 echo "║                                                              ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"

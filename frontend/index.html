@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ryze AI</title>
+    <title>BioVLM</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="css/style.css">
 </head>
@@ -16,9 +16,9 @@
             <div class="sidebar-header">
                 <div class="logo">
                     <div class="logo-icon">
-                        <i class="fas fa-bolt"></i>
+                        <i class="fas fa-dna"></i>
                     </div>
-                    <span class="logo-text">Ryze AI</span>
+                    <span class="logo-text">BioVLM</span>
                 </div>
                 <button class="sidebar-toggle" id="sidebarToggle">
                     <i class="fas fa-bars"></i>
@@ -44,7 +44,7 @@
                 <div class="model-info">
                     <div class="model-badge">
                         <i class="fas fa-microchip"></i>
-                        <span>Qwen3-VL-8B</span>
+                        <span>BioVLM-8B</span>
                     </div>
                     <div class="model-status online">
                         <span class="status-dot"></span>
@@ -61,7 +61,7 @@
                     <button class="mobile-menu-btn" id="mobileMenuBtn">
                         <i class="fas fa-bars"></i>
                     </button>
-                    <h1>Ryze AI</h1>
+                    <h1>BioVLM</h1>
                     <span class="beta-badge">BETA</span>
                 </div>
                 <div class="header-right">
@@ -78,35 +78,35 @@
                 <div class="welcome-screen" id="welcomeScreen">
                     <div class="welcome-logo">
                         <div class="welcome-icon">
-                            <i class="fas fa-bolt"></i>
+                            <i class="fas fa-dna"></i>
                         </div>
                         <h2>How can I help you today?</h2>
-                        <p>I'm a multimodal AI assistant that can understand text and images.</p>
+                        <p>BioVLM is a multimodal AI assistant that understands text and images.</p>
                     </div>
-                    
+
                     <div class="feature-cards">
-                        <div class="feature-card" onclick="useSuggestion('Analyze this image for me')">
+                        <div class="feature-card" onclick="useSuggestion('Analyze this medical image for me')">
                             <div class="feature-icon">
                                 <i class="fas fa-image"></i>
                             </div>
-                            <h3>Image Understanding</h3>
+                            <h3>Image Analysis</h3>
                             <p>Upload images for analysis and description</p>
                         </div>
-                        <div class="feature-card" onclick="useSuggestion('Explain quantum computing in simple terms')">
+                        <div class="feature-card" onclick="useSuggestion('Explain the mechanisms of CRISPR gene editing')">
                             <div class="feature-icon">
                                 <i class="fas fa-lightbulb"></i>
                             </div>
-                            <h3>Smart Q&A</h3>
+                            <h3>Smart Q&amp;A</h3>
                             <p>Get clear answers to complex questions</p>
                         </div>
-                        <div class="feature-card" onclick="useSuggestion('Write a Python function to sort a list')">
+                        <div class="feature-card" onclick="useSuggestion('Write a Python script to parse FASTA sequences')">
                             <div class="feature-icon">
                                 <i class="fas fa-code"></i>
                             </div>
                             <h3>Code Assistant</h3>
                             <p>Help with coding, debugging, and more</p>
                         </div>
-                        <div class="feature-card" onclick="useSuggestion('Summarize the key points of machine learning')">
+                        <div class="feature-card" onclick="useSuggestion('Summarize the key findings in genomics research')">
                             <div class="feature-icon">
                                 <i class="fas fa-book"></i>
                             </div>
@@ -127,31 +127,31 @@
                             </button>
                         </div>
                     </div>
-                    
+
                     <div class="input-tools">
                         <button class="tool-btn" id="uploadBtn" title="Upload Image">
                             <i class="fas fa-image"></i>
                         </button>
                         <input type="file" id="imageInput" accept="image/*" style="display: none;">
                     </div>
-                    
+
                     <div class="input-field-wrapper">
-                        <textarea 
-                            id="messageInput" 
-                            placeholder="Message Ryze..."
+                        <textarea
+                            id="messageInput"
+                            placeholder="Message BioVLM..."
                             rows="1"
                             maxlength="10000"
                         ></textarea>
                         <div class="char-counter" id="charCounter">0 / 10000</div>
                     </div>
-                    
+
                     <button class="send-btn" id="sendBtn" disabled>
                         <i class="fas fa-arrow-up"></i>
                     </button>
                 </div>
-                
+
                 <div class="input-footer">
-                    <span>Powered by ServerlessLLM + Qwen3-VL-8B-GRPO</span>
+                    <span>Powered by BioVLM + GPT &nbsp;|&nbsp; Responses shown side by side</span>
                 </div>
             </div>
         </main>
@@ -169,7 +169,15 @@
             <div class="modal-body">
                 <div class="setting-group">
                     <label>API Endpoint</label>
-                    <input type="text" id="apiEndpoint" value="http://localhost:8000">
+                    <input type="text" id="apiEndpoint" value="http://localhost:3001">
+                </div>
+                <div class="setting-group">
+                    <label>OpenAI API Key</label>
+                    <input type="password" id="openaiApiKey" placeholder="sk-...">
+                </div>
+                <div class="setting-group">
+                    <label>GPT Model</label>
+                    <input type="text" id="gptModel" placeholder="e.g. gpt-4o-mini">
                 </div>
                 <div class="setting-group">
                     <label>Temperature</label>
@@ -183,7 +191,7 @@
                     <input type="number" id="maxTokens" value="2048" min="1" max="8192">
                 </div>
                 <div class="setting-group">
-                    <label>Streaming</label>
+                    <label>Streaming (BioVLM only)</label>
                     <label class="switch">
                         <input type="checkbox" id="streamMode" checked>
                         <span class="slider-toggle"></span>

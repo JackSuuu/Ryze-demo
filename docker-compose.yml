@@ -6,11 +6,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: ryze-backend
+    container_name: biolvlm-backend
     ports:
       - "8000:8000"
     environment:
-      - MODEL_NAME=chivier/qwen3-vl-8b-grpo
+      - MODEL_NAME=chivier/biolvlm-8b-grpo
+      - OPENAI_API_KEY=
+      - OPENAI_MODEL=gpt-4o-mini
       - CUDA_VISIBLE_DEVICES=0
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
@@ -31,7 +33,7 @@ services:
   # Frontend Static Files
   frontend:
     image: nginx:alpine
-    container_name: ryze-frontend
+    container_name: biolvlm-frontend
     ports:
       - "3000:80"
     volumes:
@@ -43,4 +45,4 @@ services:
 
 networks:
   default:
-    name: ryze-network
+    name: biolvlm-network

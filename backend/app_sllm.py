@@ -1,10 +1,11 @@
 """
-Ryze Chatbot Backend - ServerlessLLM Integration
+BioVLM Chatbot Backend - ServerlessLLM Integration
 Uses ServerlessLLM's OpenAI-compatible API
 """
 import os
 import base64
 import asyncio
+import time
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,11 +16,14 @@ import httpx
 
 # Configuration
 LLM_SERVER_URL = os.environ.get("LLM_SERVER_URL", "http://localhost:8343")
-MODEL_NAME = os.environ.get("MODEL_NAME", "chivier/qwen3-vl-8b-grpo")
+MODEL_NAME = os.environ.get("MODEL_NAME", "chivier/biolvlm-8b-grpo")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+GPT_RATE_LIMIT_SECONDS = 60
 
 app = FastAPI(
-    title="Ryze Chatbot API",
-    description="Chatbot powered by ServerlessLLM",
+    title="BioVLM Chatbot API",
+    description="Chatbot powered by BioVLM via ServerlessLLM",
     version="1.0.0"
 )
 
@@ -30,6 +34,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# GPT rate limit state
+_gpt_last_call_time: float = 0.0
+_gpt_rate_lock = asyncio.Lock()
 
 
 class Message(BaseModel):
@@ -50,6 +58,12 @@ class ChatResponse(BaseModel):
     usage: Dict[str, int]
 
 
+class GPTChatResponse(BaseModel):
+    response: str
+    model: str
+    usage: Dict[str, int]
+
+
 async def check_model_deployed() -> bool:
     """Check if model is deployed on ServerlessLLM"""
     try:
@@ -67,12 +81,10 @@ async def deploy_model():
     """Deploy model to ServerlessLLM"""
     try:
         async with httpx.AsyncClient(timeout=300.0) as client:
-            # Check if already deployed
             if await check_model_deployed():
                 print(f"Model {MODEL_NAME} already deployed")
                 return True
-            
-            # Deploy the model
+
             print(f"Deploying model {MODEL_NAME}...")
             response = await client.post(
                 f"{LLM_SERVER_URL}/register",
@@ -93,7 +105,7 @@ async def deploy_model():
 
 
 async def call_serverless_llm(messages: List[Dict], max_tokens: int, temperature: float) -> str:
-    """Call ServerlessLLM API"""
+    """Call BioVLM via ServerlessLLM API"""
     async with httpx.AsyncClient(timeout=120.0) as client:
         payload = {
             "model": MODEL_NAME,
@@ -101,37 +113,35 @@ async def call_serverless_llm(messages: List[Dict], max_tokens: int, temperature
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        
+
         response = await client.post(
             f"{LLM_SERVER_URL}/v1/chat/completions",
             json=payload
         )
-        
+
         if response.status_code != 200:
             raise HTTPException(status_code=response.status_code, detail=response.text)
-        
+
         result = response.json()
         return result["choices"][0]["message"]["content"]
 
 
 async def generate_response(messages: List[Message], max_tokens: int, temperature: float) -> str:
-    """Generate response"""
-    # Convert to OpenAI format
+    """Generate response from BioVLM"""
     openai_messages = []
     for msg in messages:
         openai_messages.append({
             "role": msg.role,
             "content": msg.content
         })
-    
+
     try:
         return await call_serverless_llm(openai_messages, max_tokens, temperature)
     except Exception as e:
-        # Fallback to mock response
-        print(f"ServerlessLLM error: {e}, using mock response")
+        print(f"BioVLM error: {e}, using fallback response")
         await asyncio.sleep(0.3)
         user_msg = messages[-1].content if messages else "Hello"
-        return f"Thank you for your message: \"{user_msg}\"\n\nI'm Ryze AI. The model is currently loading or unavailable. Please try again in a moment."
+        return f"Thank you for your message: \"{user_msg}\"\n\nI'm BioVLM. The model is currently loading or unavailable. Please try again in a moment."
 
 
 async def generate_stream(messages: List[Message], max_tokens: int, temperature: float):
@@ -144,11 +154,27 @@ async def generate_stream(messages: List[Message], max_tokens: int, temperature:
     yield "data: [DONE]\n\n"
 
 
+async def call_openai_gpt(messages: List[Dict], max_tokens: int, temperature: float) -> str:
+    """Call OpenAI GPT API"""
+    try:
+        import openai
+        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+        response = await client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
+
+
 @app.on_event("startup")
 async def startup_event():
-    print(f"ServerlessLLM URL: {LLM_SERVER_URL}")
+    print(f"BioVLM ServerlessLLM URL: {LLM_SERVER_URL}")
     print(f"Model: {MODEL_NAME}")
-    # Try to deploy model
+    print(f"GPT Model: {OPENAI_MODEL}")
     await deploy_model()
 
 
@@ -156,7 +182,7 @@ async def startup_event():
 async def root():
     deployed = await check_model_deployed()
     return {
-        "message": "Welcome to Ryze Chatbot API",
+        "message": "Welcome to BioVLM Chatbot API",
         "model": MODEL_NAME,
         "serverless_llm_url": LLM_SERVER_URL,
         "status": "ready" if deployed else "model_not_deployed"
@@ -219,9 +245,9 @@ async def chat_multimodal(
     if image:
         contents = await image.read()
         image_base64 = base64.b64encode(contents).decode()
-    
+
     messages = [Message(role="user", content=message, image=image_base64)]
-    
+
     try:
         response = await generate_response(messages, max_tokens, temperature)
         return ChatResponse(
@@ -232,6 +258,58 @@ async def chat_multimodal(
                 "total_tokens": len(message.split()) + len(response.split())
             }
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/chat/gpt/status")
+async def gpt_status():
+    """Check GPT rate limit status"""
+    current_time = time.time()
+    elapsed = current_time - _gpt_last_call_time
+    remaining = max(0, int(GPT_RATE_LIMIT_SECONDS - elapsed)) if _gpt_last_call_time > 0 else 0
+    return {
+        "available": remaining == 0,
+        "seconds_remaining": remaining,
+        "rate_limit_seconds": GPT_RATE_LIMIT_SECONDS,
+        "model": OPENAI_MODEL
+    }
+
+
+@app.post("/chat/gpt", response_model=GPTChatResponse)
+async def chat_gpt(request: ChatRequest):
+    """Chat with GPT (rate limited: 1 call per minute)"""
+    global _gpt_last_call_time
+
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured. Set OPENAI_API_KEY env var.")
+
+    async with _gpt_rate_lock:
+        current_time = time.time()
+        elapsed = current_time - _gpt_last_call_time
+        if _gpt_last_call_time > 0 and elapsed < GPT_RATE_LIMIT_SECONDS:
+            remaining = int(GPT_RATE_LIMIT_SECONDS - elapsed)
+            raise HTTPException(
+                status_code=429,
+                detail={"message": "Rate limited", "seconds_remaining": remaining}
+            )
+        _gpt_last_call_time = current_time
+
+    openai_messages = [{"role": m.role, "content": m.content} for m in request.messages]
+
+    try:
+        response = await call_openai_gpt(openai_messages, request.max_tokens, request.temperature)
+        return GPTChatResponse(
+            response=response,
+            model=OPENAI_MODEL,
+            usage={
+                "prompt_tokens": sum(len(m.content.split()) for m in request.messages),
+                "completion_tokens": len(response.split()),
+                "total_tokens": sum(len(m.content.split()) for m in request.messages) + len(response.split())
+            }
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
