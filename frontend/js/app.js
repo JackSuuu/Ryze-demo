@@ -1,5 +1,5 @@
 /**
- * BioVLM Chatbot - Main Application
+ * BioVLM — Comparison Dashboard
  */
 
 // ============================================
@@ -12,15 +12,24 @@ const CONFIG = {
     maxTokens: parseInt(localStorage.getItem('maxTokens')) || 2048,
     streamMode: localStorage.getItem('streamMode') === 'true',
     openaiApiKey: localStorage.getItem('openaiApiKey') || '',
-    gptModel: localStorage.getItem('gptModel') || 'gpt-4o-mini'
+    gptModel: localStorage.getItem('gptModel') || 'gpt-5-mini'
 };
 
 const STATE = {
-    messages: [],
+    sessions: [],        // Array of { id, title, messages, baselineHtml, usHtml }
+    currentSessionId: null,
     currentImage: null,
-    isLoading: false,
-    isDarkTheme: false
+    isLoading: false
 };
+
+let _sessionCounter = 0;
+
+// Bootstrap with one empty session
+(function initFirstSession() {
+    const session = createSession();
+    STATE.sessions.push(session);
+    STATE.currentSessionId = session.id;
+})();
 
 // ============================================
 // DOM Elements
@@ -29,22 +38,24 @@ const STATE = {
 const elements = {
     // Sidebar
     sidebar: document.getElementById('sidebar'),
-    sidebarToggle: document.getElementById('sidebarToggle'),
-    mobileMenuBtn: document.getElementById('mobileMenuBtn'),
     newChatBtn: document.getElementById('newChatBtn'),
     chatHistory: document.getElementById('chatHistory'),
 
-    // Chat
-    chatMessages: document.getElementById('chatMessages'),
-    welcomeScreen: document.getElementById('welcomeScreen'),
+    // Panels
+    comparisonArea: document.getElementById('comparisonArea'),
+    panelBaseline: document.getElementById('panelBaseline'),
+    panelUs: document.getElementById('panelUs'),
+    baselineChat: document.getElementById('baselineChat'),
+    usChat: document.getElementById('usChat'),
+
+    // Input
+    inputBar: document.getElementById('inputBar'),
+    inputBarInner: document.getElementById('inputBarInner'),
+    inputPreviewRow: document.getElementById('inputPreviewRow'),
     messageInput: document.getElementById('messageInput'),
     sendBtn: document.getElementById('sendBtn'),
-    charCounter: document.getElementById('charCounter'),
-
-    // Image
-    imageInput: document.getElementById('imageInput'),
     uploadBtn: document.getElementById('uploadBtn'),
-    imagePreviewContainer: document.getElementById('imagePreviewContainer'),
+    imageInput: document.getElementById('imageInput'),
     imagePreview: document.getElementById('imagePreview'),
     removeImageBtn: document.getElementById('removeImageBtn'),
 
@@ -53,7 +64,6 @@ const elements = {
     settingsModal: document.getElementById('settingsModal'),
     closeSettings: document.getElementById('closeSettings'),
     saveSettings: document.getElementById('saveSettings'),
-    themeBtn: document.getElementById('themeBtn'),
 
     // Toast
     toastContainer: document.getElementById('toastContainer'),
@@ -75,28 +85,29 @@ const elements = {
 document.addEventListener('DOMContentLoaded', () => {
     initEventListeners();
     loadSettings();
-    autoResizeTextarea();
+    updateBaselineLabel();
+    renderSidebar();
 });
 
 function initEventListeners() {
-    // Sidebar
-    elements.sidebarToggle?.addEventListener('click', toggleSidebar);
-    elements.mobileMenuBtn?.addEventListener('click', toggleMobileSidebar);
     elements.newChatBtn?.addEventListener('click', newChat);
-
-    // Input
-    elements.messageInput?.addEventListener('input', handleInputChange);
+    elements.messageInput?.addEventListener('input', updateSendButton);
     elements.messageInput?.addEventListener('keydown', handleKeyDown);
     elements.sendBtn?.addEventListener('click', sendMessage);
 
-    // Image
+    // Image upload button
     elements.uploadBtn?.addEventListener('click', () => elements.imageInput.click());
     elements.imageInput?.addEventListener('change', handleImageSelect);
     elements.removeImageBtn?.addEventListener('click', removeImage);
 
-    // Drag & Drop
-    elements.messageInput?.addEventListener('dragover', handleDragOver);
-    elements.messageInput?.addEventListener('drop', handleDrop);
+    // Drag & drop on entire input bar
+    elements.inputBar?.addEventListener('dragenter', handleDragEnter);
+    elements.inputBar?.addEventListener('dragover', handleDragOver);
+    elements.inputBar?.addEventListener('dragleave', handleDragLeave);
+    elements.inputBar?.addEventListener('drop', handleDrop);
+
+    // Paste image support
+    elements.messageInput?.addEventListener('paste', handlePaste);
 
     // Settings
     elements.settingsBtn?.addEventListener('click', openSettings);
@@ -104,10 +115,6 @@ function initEventListeners() {
     elements.saveSettings?.addEventListener('click', saveSettings);
     elements.temperatureInput?.addEventListener('input', updateTempDisplay);
 
-    // Theme
-    elements.themeBtn?.addEventListener('click', toggleTheme);
-
-    // Close modal on outside click
     elements.settingsModal?.addEventListener('click', (e) => {
         if (e.target === elements.settingsModal) closeSettings();
     });
@@ -124,52 +131,8 @@ function loadSettings() {
 }
 
 // ============================================
-// Sidebar Functions
+// Send Message (Panel-based)
 // ============================================
-
-function toggleSidebar() {
-    elements.sidebar.classList.toggle('collapsed');
-}
-
-function toggleMobileSidebar() {
-    elements.sidebar.classList.toggle('active');
-}
-
-function newChat() {
-    STATE.messages = [];
-    STATE.currentImage = null;
-
-    elements.chatMessages.innerHTML = '';
-    elements.chatMessages.appendChild(elements.welcomeScreen.cloneNode(true));
-    elements.welcomeScreen.style.display = 'flex';
-
-    removeImage();
-    elements.messageInput.value = '';
-    updateSendButton();
-
-    showToast('New chat created', 'success');
-}
-
-// ============================================
-// Message Functions
-// ============================================
-
-function handleInputChange() {
-    autoResizeTextarea();
-    updateCharCounter();
-    updateSendButton();
-}
-
-function autoResizeTextarea() {
-    const textarea = elements.messageInput;
-    textarea.style.height = 'auto';
-    textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
-}
-
-function updateCharCounter() {
-    const count = elements.messageInput.value.length;
-    elements.charCounter.textContent = `${count} / 10000`;
-}
 
 function updateSendButton() {
     const hasContent = elements.messageInput.value.trim().length > 0 || STATE.currentImage;
@@ -177,7 +140,7 @@ function updateSendButton() {
 }
 
 function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter') {
         e.preventDefault();
         sendMessage();
     }
@@ -187,71 +150,312 @@ async function sendMessage() {
     const content = elements.messageInput.value.trim();
     if ((!content && !STATE.currentImage) || STATE.isLoading) return;
 
-    // Hide welcome screen
-    const welcomeScreen = document.querySelector('.welcome-screen');
-    if (welcomeScreen) {
-        welcomeScreen.style.display = 'none';
-    }
+    const session = getCurrentSession();
+    if (!session) return;
 
-    // Add user message
     const userMessage = {
         role: 'user',
         content: content,
         image: STATE.currentImage
     };
-    STATE.messages.push(userMessage);
-    renderUserMessage(userMessage);
+    session.messages.push(userMessage);
+
+    // Update session title from first user message
+    if (session.messages.filter(m => m.role === 'user').length === 1) {
+        const title = (content || 'Image query').slice(0, 30) + ((content || '').length > 30 ? '...' : '');
+        session.title = title;
+        updateSidebarTitle(session.id, title);
+    }
+
+    // Clear empty placeholders on first message
+    clearEmptyPlaceholders();
+
+    // Add user bubble to both panels (with image if present)
+    appendUserBubble(elements.baselineChat, content, STATE.currentImage);
+    appendUserBubble(elements.usChat, content, STATE.currentImage);
+
+    // Add typing indicator bubbles
+    const baselineLoading = appendLoadingBubble(elements.baselineChat);
+    const usLoading = appendLoadingBubble(elements.usChat);
 
     // Clear input
     elements.messageInput.value = '';
     STATE.currentImage = null;
     removeImage();
-    autoResizeTextarea();
-    updateCharCounter();
     updateSendButton();
 
     STATE.isLoading = true;
     updateSendButton();
 
-    // Create split response container with loading indicators
-    const responseContainer = createResponseContainer();
-    elements.chatMessages.appendChild(responseContainer);
-    scrollToBottom();
-
-    const biolvlmContent = responseContainer.querySelector('.biolvlm-content');
-    const gptContent = responseContainer.querySelector('.gpt-content');
-
     // Fire both requests in parallel
-    const messagesToSend = [...STATE.messages];
+    const messagesToSend = [...session.messages];
     const [biolvlmResult, gptResult] = await Promise.allSettled([
         sendBioVLMRequest(messagesToSend),
         sendGPTRequest(messagesToSend)
     ]);
 
-    // Handle BioVLM result
-    if (biolvlmResult.status === 'fulfilled') {
-        const response = biolvlmResult.value;
-        biolvlmContent.innerHTML = formatMessageContent(response);
-        STATE.messages.push({ role: 'assistant', content: response });
-    } else {
-        biolvlmContent.innerHTML = `<p class="error-text">⚠️ ${biolvlmResult.reason.message}</p>`;
-    }
-
-    // Handle GPT result
+    // Replace loading bubble with response — Baseline (GPT/OpenAI, left panel)
+    baselineLoading.remove();
     if (gptResult.status === 'fulfilled') {
-        gptContent.innerHTML = formatMessageContent(gptResult.value.response);
+        appendAssistantBubble(elements.baselineChat, gptResult.value.response);
     } else {
         const err = gptResult.reason;
         if (err.type === 'rate_limit') {
-            showRateLimitCountdown(gptContent, err.secondsRemaining);
+            const bubble = appendAssistantBubble(elements.baselineChat, null);
+            showRateLimitCountdown(bubble, err.secondsRemaining);
         } else {
-            gptContent.innerHTML = `<p class="error-text">⚠️ ${err.message}</p>`;
+            appendAssistantBubble(elements.baselineChat, null, err.message);
         }
     }
 
+    // Replace loading bubble with response — BioVLM (right panel)
+    usLoading.remove();
+    if (biolvlmResult.status === 'fulfilled') {
+        const response = biolvlmResult.value;
+        appendAssistantBubble(elements.usChat, response);
+        session.messages.push({ role: 'assistant', content: response });
+    } else {
+        appendAssistantBubble(elements.usChat, null, biolvlmResult.reason.message);
+    }
+
+    // Save panel state
+    saveCurrentSession();
+
     STATE.isLoading = false;
     updateSendButton();
-    scrollToBottom();
+}
+
+// ============================================
+// Bubble Helpers
+// ============================================
+
+function clearEmptyPlaceholders() {
+    elements.baselineChat.querySelector('.panel-empty')?.remove();
+    elements.usChat.querySelector('.panel-empty')?.remove();
+}
+
+function appendUserBubble(chatEl, text, imageSrc) {
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble bubble-user';
+
+    let html = '';
+    if (imageSrc) {
+        html += `<img class="bubble-image" src="${imageSrc}" alt="Uploaded image">`;
+    }
+    if (text) {
+        html += `<p>${escapeHtml(text)}</p>`;
+    }
+    bubble.innerHTML = html;
+    chatEl.appendChild(bubble);
+    chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function appendAssistantBubble(chatEl, content, errorMsg) {
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble bubble-assistant';
+
+    if (errorMsg) {
+        bubble.innerHTML = `<p class="error-text">${escapeHtml(errorMsg)}</p>`;
+    } else {
+        bubble.innerHTML = formatMessageContent(content);
+    }
+
+    chatEl.appendChild(bubble);
+    chatEl.scrollTop = chatEl.scrollHeight;
+    return bubble;
+}
+
+function appendLoadingBubble(chatEl) {
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble bubble-assistant';
+    bubble.innerHTML = `
+        <div class="typing-indicator">
+            <span class="typing-dot"></span>
+            <span class="typing-dot"></span>
+            <span class="typing-dot"></span>
+        </div>
+    `;
+    chatEl.appendChild(bubble);
+    chatEl.scrollTop = chatEl.scrollHeight;
+    return bubble;
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+function resetPanels() {
+    elements.baselineChat.innerHTML = '<div class="panel-empty"><i class="fas fa-robot"></i><span>OpenAI responses appear here</span></div>';
+    elements.usChat.innerHTML = '<div class="panel-empty"><i class="fas fa-dna"></i><span>BioVLM responses appear here</span></div>';
+}
+
+// ============================================
+// Session Helpers
+// ============================================
+
+function createSession() {
+    _sessionCounter++;
+    return {
+        id: 'sess_' + Date.now() + '_' + _sessionCounter,
+        title: 'New Chat',
+        messages: [],
+        baselineHtml: null,   // saved innerHTML of baselineChat
+        usHtml: null           // saved innerHTML of usChat
+    };
+}
+
+function getCurrentSession() {
+    return STATE.sessions.find(s => s.id === STATE.currentSessionId);
+}
+
+function saveCurrentSession() {
+    const session = getCurrentSession();
+    if (!session) return;
+    session.baselineHtml = elements.baselineChat.innerHTML;
+    session.usHtml = elements.usChat.innerHTML;
+}
+
+function restoreSession(session) {
+    STATE.currentSessionId = session.id;
+
+    if (session.baselineHtml) {
+        elements.baselineChat.innerHTML = session.baselineHtml;
+    } else {
+        resetPanels();
+    }
+    if (session.usHtml) {
+        elements.usChat.innerHTML = session.usHtml;
+    }
+
+    highlightSidebarItem(session.id);
+}
+
+// ============================================
+// New Chat
+// ============================================
+
+function newChat() {
+    // Save current session before switching
+    saveCurrentSession();
+
+    const session = createSession();
+    STATE.sessions.push(session);
+    STATE.currentSessionId = session.id;
+    STATE.currentImage = null;
+
+    removeImage();
+    elements.messageInput.value = '';
+    updateSendButton();
+    resetPanels();
+
+    // Add to sidebar and highlight
+    addSidebarItem(session);
+    highlightSidebarItem(session.id);
+}
+
+// ============================================
+// Sidebar / History Management
+// ============================================
+
+function renderSidebar() {
+    elements.chatHistory.innerHTML = '';
+
+    // Add "Today" section label
+    const label = document.createElement('div');
+    label.className = 'history-section-label';
+    label.textContent = 'Today';
+    elements.chatHistory.appendChild(label);
+
+    // Render newest first
+    for (let i = STATE.sessions.length - 1; i >= 0; i--) {
+        appendSidebarItem(STATE.sessions[i]);
+    }
+    highlightSidebarItem(STATE.currentSessionId);
+}
+
+function addSidebarItem(session) {
+    // Insert after the section label, before other items
+    const label = elements.chatHistory.querySelector('.history-section-label');
+    const item = createSidebarItem(session);
+    if (label && label.nextSibling) {
+        elements.chatHistory.insertBefore(item, label.nextSibling);
+    } else {
+        elements.chatHistory.appendChild(item);
+    }
+}
+
+function appendSidebarItem(session) {
+    elements.chatHistory.appendChild(createSidebarItem(session));
+}
+
+function createSidebarItem(session) {
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    item.dataset.sessionId = session.id;
+
+    const titleSpan = document.createElement('span');
+    titleSpan.textContent = session.title;
+    item.appendChild(titleSpan);
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'history-delete';
+    deleteBtn.innerHTML = '<i class="fas fa-trash"></i>';
+    deleteBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteSession(session.id);
+    });
+    item.appendChild(deleteBtn);
+
+    item.addEventListener('click', () => switchToSession(session.id));
+    return item;
+}
+
+function updateSidebarTitle(sessionId, title) {
+    const item = elements.chatHistory.querySelector(`[data-session-id="${sessionId}"]`);
+    if (item) {
+        const span = item.querySelector('span');
+        if (span) span.textContent = title;
+    }
+}
+
+function switchToSession(sessionId) {
+    if (sessionId === STATE.currentSessionId) return;
+    if (STATE.isLoading) return;
+
+    saveCurrentSession();
+    const session = STATE.sessions.find(s => s.id === sessionId);
+    if (session) restoreSession(session);
+}
+
+function deleteSession(sessionId) {
+    // Don't delete the last session
+    if (STATE.sessions.length <= 1) return;
+
+    const idx = STATE.sessions.findIndex(s => s.id === sessionId);
+    if (idx === -1) return;
+
+    STATE.sessions.splice(idx, 1);
+
+    // If we deleted the active session, switch to the most recent one
+    if (sessionId === STATE.currentSessionId) {
+        const target = STATE.sessions[STATE.sessions.length - 1];
+        STATE.currentSessionId = target.id;
+        restoreSession(target);
+    }
+
+    // Remove from DOM
+    const item = elements.chatHistory.querySelector(`[data-session-id="${sessionId}"]`);
+    if (item) item.remove();
+
+    highlightSidebarItem(STATE.currentSessionId);
+}
+
+function highlightSidebarItem(sessionId) {
+    elements.chatHistory.querySelectorAll('.history-item').forEach(el => el.classList.remove('active'));
+    const item = elements.chatHistory.querySelector(`[data-session-id="${sessionId}"]`);
+    if (item) item.classList.add('active');
 }
 
 // ============================================
@@ -353,68 +557,26 @@ async function sendGPTRequest(messages) {
 }
 
 // ============================================
-// Response Container (Split View)
+// Rate Limit Countdown
 // ============================================
 
-function createResponseContainer() {
-    const container = document.createElement('div');
-    container.className = 'response-pair';
-
-    const time = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-    const gptLabel = CONFIG.gptModel || 'GPT';
-
-    container.innerHTML = `
-        <div class="response-panel panel-biolvlm">
-            <div class="panel-label">
-                <div class="panel-avatar biolvlm-avatar"><i class="fas fa-dna"></i></div>
-                <span class="panel-name">BioVLM</span>
-                <span class="panel-time">${time}</span>
-            </div>
-            <div class="biolvlm-content panel-content">
-                <div class="typing-indicator">
-                    <span class="typing-dot"></span>
-                    <span class="typing-dot"></span>
-                    <span class="typing-dot"></span>
-                </div>
-            </div>
-        </div>
-        <div class="response-panel panel-gpt">
-            <div class="panel-label">
-                <div class="panel-avatar gpt-avatar"><i class="fas fa-robot"></i></div>
-                <span class="panel-name">GPT</span>
-                <span class="panel-model">${gptLabel}</span>
-                <span class="panel-time">${time}</span>
-            </div>
-            <div class="gpt-content panel-content">
-                <div class="typing-indicator">
-                    <span class="typing-dot"></span>
-                    <span class="typing-dot"></span>
-                    <span class="typing-dot"></span>
-                </div>
-            </div>
-        </div>
-    `;
-
-    return container;
-}
-
-function showRateLimitCountdown(panelContent, secondsRemaining) {
+function showRateLimitCountdown(panelEl, secondsRemaining) {
     let remaining = secondsRemaining;
 
-    panelContent.innerHTML = `
+    panelEl.innerHTML = `
         <div class="rate-limit-notice">
             <i class="fas fa-clock"></i>
             <span>Rate limited &mdash; next call in <span class="countdown">${remaining}s</span></span>
         </div>
     `;
 
-    const countdownEl = panelContent.querySelector('.countdown');
+    const countdownEl = panelEl.querySelector('.countdown');
 
     const interval = setInterval(() => {
         remaining--;
         if (remaining <= 0) {
             clearInterval(interval);
-            panelContent.innerHTML = `
+            panelEl.innerHTML = `
                 <div class="rate-limit-ready">
                     <i class="fas fa-check-circle"></i>
                     <span>Ready &mdash; send a new message to use GPT</span>
@@ -427,37 +589,8 @@ function showRateLimitCountdown(panelContent, secondsRemaining) {
 }
 
 // ============================================
-// Render User Message
+// Format Message Content
 // ============================================
-
-function renderUserMessage(message) {
-    const messageEl = document.createElement('div');
-    messageEl.className = 'message user';
-
-    const time = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-
-    let imageHtml = '';
-    if (message.image) {
-        imageHtml = `<img src="${message.image}" class="message-image" alt="Uploaded image">`;
-    }
-
-    messageEl.innerHTML = `
-        <div class="message-avatar"><i class="fas fa-user"></i></div>
-        <div class="message-content">
-            <div class="message-header">
-                <span class="message-name">You</span>
-                <span class="message-time">${time}</span>
-            </div>
-            <div class="message-text">
-                ${formatMessageContent(message.content)}
-                ${imageHtml}
-            </div>
-        </div>
-    `;
-
-    elements.chatMessages.appendChild(messageEl);
-    scrollToBottom();
-}
 
 function formatMessageContent(content) {
     if (!content) return '<p></p>';
@@ -471,33 +604,49 @@ function formatMessageContent(content) {
     return `<p>${formatted}</p>`;
 }
 
-function scrollToBottom() {
-    elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
-}
-
 // ============================================
 // Image Functions
 // ============================================
 
 function handleImageSelect(e) {
     const file = e.target.files[0];
-    if (file) {
-        processImageFile(file);
-    }
+    if (file) processImageFile(file);
+}
+
+function handleDragEnter(e) {
+    e.preventDefault();
+    elements.inputBar.classList.add('drag-over');
 }
 
 function handleDragOver(e) {
     e.preventDefault();
-    e.currentTarget.style.borderColor = 'var(--accent-primary)';
+}
+
+function handleDragLeave(e) {
+    // Only remove if we actually left the input bar
+    if (!elements.inputBar.contains(e.relatedTarget)) {
+        elements.inputBar.classList.remove('drag-over');
+    }
 }
 
 function handleDrop(e) {
     e.preventDefault();
-    e.currentTarget.style.borderColor = '';
-
+    elements.inputBar.classList.remove('drag-over');
     const file = e.dataTransfer.files[0];
     if (file && file.type.startsWith('image/')) {
         processImageFile(file);
+    }
+}
+
+function handlePaste(e) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+        if (item.type.startsWith('image/')) {
+            const file = item.getAsFile();
+            if (file) processImageFile(file);
+            break;
+        }
     }
 }
 
@@ -506,7 +655,7 @@ function processImageFile(file) {
     reader.onload = (e) => {
         STATE.currentImage = e.target.result;
         elements.imagePreview.src = e.target.result;
-        elements.imagePreviewContainer.style.display = 'block';
+        elements.inputPreviewRow.style.display = 'block';
         updateSendButton();
         showToast('Image added', 'success');
     };
@@ -515,9 +664,9 @@ function processImageFile(file) {
 
 function removeImage() {
     STATE.currentImage = null;
-    elements.imagePreviewContainer.style.display = 'none';
-    elements.imagePreview.src = '';
-    elements.imageInput.value = '';
+    if (elements.inputPreviewRow) elements.inputPreviewRow.style.display = 'none';
+    if (elements.imagePreview) elements.imagePreview.src = '';
+    if (elements.imageInput) elements.imageInput.value = '';
     updateSendButton();
 }
 
@@ -539,7 +688,7 @@ function saveSettings() {
     CONFIG.maxTokens = parseInt(elements.maxTokensInput.value);
     CONFIG.streamMode = elements.streamModeInput.checked;
     CONFIG.openaiApiKey = elements.openaiApiKeyInput.value;
-    CONFIG.gptModel = elements.gptModelInput.value || 'gpt-4o-mini';
+    CONFIG.gptModel = elements.gptModelInput.value || 'gpt-5-mini';
 
     localStorage.setItem('apiEndpoint', CONFIG.apiEndpoint);
     localStorage.setItem('temperature', CONFIG.temperature);
@@ -548,6 +697,7 @@ function saveSettings() {
     localStorage.setItem('openaiApiKey', CONFIG.openaiApiKey);
     localStorage.setItem('gptModel', CONFIG.gptModel);
 
+    updateBaselineLabel();
     closeSettings();
     showToast('Settings saved', 'success');
 }
@@ -556,16 +706,9 @@ function updateTempDisplay() {
     elements.tempValue.textContent = elements.temperatureInput.value;
 }
 
-// ============================================
-// Theme Functions
-// ============================================
-
-function toggleTheme() {
-    STATE.isDarkTheme = !STATE.isDarkTheme;
-    document.body.setAttribute('data-theme', STATE.isDarkTheme ? 'dark' : 'light');
-
-    const icon = elements.themeBtn.querySelector('i');
-    icon.className = STATE.isDarkTheme ? 'fas fa-sun' : 'fas fa-moon';
+function updateBaselineLabel() {
+    const label = document.getElementById('baselineLabel');
+    if (label) label.textContent = CONFIG.gptModel;
 }
 
 // ============================================
@@ -592,17 +735,7 @@ function showToast(message, type = 'success') {
     elements.toastContainer.appendChild(toast);
 
     setTimeout(() => {
-        toast.style.animation = 'toastIn 0.3s ease reverse';
+        toast.style.animation = 'slideIn 0.3s ease reverse';
         setTimeout(() => toast.remove(), 300);
     }, 3000);
 }
-
-// ============================================
-// Suggestion Functions
-// ============================================
-
-window.useSuggestion = function(text) {
-    elements.messageInput.value = text;
-    elements.messageInput.focus();
-    handleInputChange();
-};
