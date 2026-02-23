@@ -1,11 +1,13 @@
 """
-BioVLM Chatbot Backend
+BioVLM Chatbot Backend — OpenAI-compatible API
 """
 import os
 import base64
 import asyncio
+import json
 import time
-from typing import Optional, List, Dict, Any
+import uuid
+from typing import Optional, List, Dict, Any, Union, Tuple
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -18,8 +20,9 @@ HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"
 
 # OpenAI configuration
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-GPT_RATE_LIMIT_SECONDS = 60
+ALLOWED_MODELS = {"openai/gpt-5-mini", "local/biolvlm-8b-grpo"}
 
 # ServerlessLLM imports
 SLLM_AVAILABLE = False
@@ -58,7 +61,7 @@ except ImportError:
 app = FastAPI(
     title="BioVLM Chatbot API",
     description="A powerful chatbot powered by BioVLM",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 app.add_middleware(
@@ -76,34 +79,62 @@ processor = None
 tokenizer = None
 llm_engine = None
 
-# GPT rate limit state
-_gpt_last_call_time: float = 0.0
-_gpt_rate_lock = asyncio.Lock()
+
+# ============================================
+# Pydantic Models — OpenAI-compatible
+# ============================================
+
+class ImageUrl(BaseModel):
+    url: str
+    detail: Optional[str] = "auto"
 
 
-class Message(BaseModel):
+class ContentPartText(BaseModel):
+    type: str = "text"
+    text: str
+
+
+class ContentPartImage(BaseModel):
+    type: str = "image_url"
+    image_url: ImageUrl
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: Union[str, List[Union[ContentPartText, ContentPartImage, Dict[str, Any]]]]
+
+
+class ChatCompletionRequest(BaseModel):
+    model: str
+    messages: List[ChatMessage]
+    max_tokens: Optional[int] = 2048
+    temperature: Optional[float] = 0.7
+    stream: Optional[bool] = False
+
+
+class ChatCompletionMessage(BaseModel):
     role: str
     content: str
-    image: Optional[str] = None
 
 
-class ChatRequest(BaseModel):
-    messages: List[Message]
-    max_tokens: int = 2048
-    temperature: float = 0.7
-    stream: bool = False
+class ChatCompletionChoice(BaseModel):
+    index: int
+    message: ChatCompletionMessage
+    finish_reason: str
 
 
-class ChatResponse(BaseModel):
-    response: str
-    usage: Dict[str, int]
-
-
-class GPTChatResponse(BaseModel):
-    response: str
+class ChatCompletionResponse(BaseModel):
+    id: str
+    object: str = "chat.completion"
+    created: int
     model: str
+    choices: List[ChatCompletionChoice]
     usage: Dict[str, int]
 
+
+# ============================================
+# Model Loading
+# ============================================
 
 def load_model():
     """Load the model using available backend"""
@@ -149,7 +180,6 @@ def load_model():
     if TRANSFORMERS_AVAILABLE:
         print(f"Loading model {MODEL_NAME} via transformers...")
         try:
-            # Try AutoProcessor first (wraps tokenizer + image processor)
             try:
                 processor = AutoProcessor.from_pretrained(
                     MODEL_NAME, trust_remote_code=True, token=HF_TOKEN
@@ -178,6 +208,10 @@ def load_model():
     return False
 
 
+# ============================================
+# Utility Functions
+# ============================================
+
 def process_image(image_base64: str) -> bytes:
     """Process base64 image"""
     if image_base64.startswith("data:"):
@@ -198,37 +232,60 @@ def ensure_data_uri(image_base64: str) -> str:
     return f"data:image/jpeg;base64,{image_base64}"
 
 
-def build_multimodal_messages(messages: List[Message]):
-    """Convert List[Message] to Qwen-VL chat format with PIL images.
+# ============================================
+# Model Routing & Message Parsing
+# ============================================
 
-    Returns:
-        (qwen_messages, pil_images) where qwen_messages is the structured
-        list for apply_chat_template and pil_images is a flat list of PIL
-        images in order of appearance.
+def parse_model_id(model: str) -> Tuple[str, str]:
+    """Parse 'provider/model_name' into (provider, model_name).
+    If no slash, treat entire string as model_name with provider='local'.
+    """
+    if "/" in model:
+        provider, _, model_name = model.partition("/")
+        return provider.lower(), model_name
+    return "local", model
+
+
+def parse_openai_messages(messages: List[ChatMessage]) -> Tuple[List[dict], List]:
+    """Convert OpenAI-format messages to internal Qwen-VL format.
+    Returns: (qwen_messages, pil_images)
     """
     qwen_messages = []
     pil_images = []
     for msg in messages:
-        if msg.image and PILImage is not None:
-            pil_img = base64_to_pil(msg.image)
-            pil_images.append(pil_img)
-            qwen_messages.append({
-                "role": msg.role,
-                "content": [
-                    {"type": "image", "image": pil_img},
-                    {"type": "text", "text": msg.content},
-                ],
-            })
-        else:
+        if isinstance(msg.content, str):
             qwen_messages.append({"role": msg.role, "content": msg.content})
+        else:
+            text_parts = []
+            msg_images = []
+            for part in msg.content:
+                part_dict = part if isinstance(part, dict) else part.model_dump() if hasattr(part, 'model_dump') else {}
+                if part_dict.get("type") == "text":
+                    text_parts.append(part_dict.get("text", ""))
+                elif part_dict.get("type") == "image_url":
+                    url = part_dict.get("image_url", {}).get("url", "")
+                    if PILImage is not None and url:
+                        pil_img = base64_to_pil(url)
+                        msg_images.append(pil_img)
+                        pil_images.append(pil_img)
+            combined_text = " ".join(text_parts)
+            if msg_images:
+                content_parts = [{"type": "image", "image": img} for img in msg_images]
+                content_parts.append({"type": "text", "text": combined_text})
+                qwen_messages.append({"role": msg.role, "content": content_parts})
+            else:
+                qwen_messages.append({"role": msg.role, "content": combined_text})
     return qwen_messages, pil_images
 
 
-async def generate_response(messages: List[Message], max_tokens: int, temperature: float) -> str:
-    """Generate response from BioVLM"""
+# ============================================
+# Generation
+# ============================================
+
+async def generate_response_from_parsed(qwen_messages: list, pil_images: list, max_tokens: int, temperature: float) -> str:
+    """Generate response from BioVLM using pre-parsed Qwen-VL format messages."""
     global model, tokenizer, llm_engine
 
-    qwen_messages, pil_images = build_multimodal_messages(messages)
     has_images = len(pil_images) > 0
 
     # vLLM generation
@@ -246,11 +303,13 @@ async def generate_response(messages: List[Message], max_tokens: int, temperatur
                 [prompt], sampling_params, multi_modal_data=mm_data
             )
         else:
-            # Fallback: naive text prompt (no image support without processor)
             prompt_parts = []
-            for msg in messages:
-                role = "User" if msg.role == "user" else "Assistant"
-                prompt_parts.append(f"{role}: {msg.content}")
+            for msg in qwen_messages:
+                content = msg["content"] if isinstance(msg["content"], str) else " ".join(
+                    p.get("text", "") for p in msg["content"] if isinstance(p, dict) and p.get("type") == "text"
+                )
+                role = "User" if msg["role"] == "user" else "Assistant"
+                prompt_parts.append(f"{role}: {content}")
             prompt = "\n".join(prompt_parts) + "\nAssistant:"
             outputs = llm_engine.generate([prompt], sampling_params)
         return outputs[0].outputs[0].text.strip()
@@ -271,9 +330,12 @@ async def generate_response(messages: List[Message], max_tokens: int, temperatur
                 )
             else:
                 prompt_parts = []
-                for msg in messages:
-                    role = "User" if msg.role == "user" else "Assistant"
-                    prompt_parts.append(f"{role}: {msg.content}")
+                for msg in qwen_messages:
+                    content = msg["content"] if isinstance(msg["content"], str) else " ".join(
+                        p.get("text", "") for p in msg["content"] if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                    role = "User" if msg["role"] == "user" else "Assistant"
+                    prompt_parts.append(f"{role}: {content}")
                 prompt = "\n".join(prompt_parts) + "\nAssistant:"
             inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
@@ -290,7 +352,13 @@ async def generate_response(messages: List[Message], max_tokens: int, temperatur
 
     # Mock response
     await asyncio.sleep(0.5)
-    user_msg = messages[-1].content if messages else "Hello"
+    last_msg = qwen_messages[-1] if qwen_messages else {"content": "Hello"}
+    if isinstance(last_msg["content"], str):
+        user_msg = last_msg["content"]
+    else:
+        user_msg = " ".join(
+            p.get("text", "") for p in last_msg["content"] if isinstance(p, dict) and p.get("type") == "text"
+        )
     image_note = ""
     if has_images:
         image_note = f"\n\n[I received {len(pil_images)} image(s) with your message. In production mode, I would analyze them using my vision capabilities.]"
@@ -303,35 +371,114 @@ async def generate_response(messages: List[Message], max_tokens: int, temperatur
     return random.choice(mock_responses)
 
 
-async def generate_stream(messages: List[Message], max_tokens: int, temperature: float):
-    """Stream response"""
-    response = await generate_response(messages, max_tokens, temperature)
-    words = response.split()
-    for word in words:
-        yield f"data: {word} \n\n"
+# ============================================
+# Response Builders
+# ============================================
+
+def build_chat_completion(model_id: str, content: str) -> dict:
+    """Build an OpenAI-compatible chat completion response."""
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_id,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": len(content.split()),
+            "total_tokens": len(content.split())
+        }
+    }
+
+
+async def generate_openai_stream(model_id: str, qwen_messages: list, pil_images: list, max_tokens: int, temperature: float):
+    """Generate OpenAI-format SSE streaming chunks."""
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    created = int(time.time())
+
+    response = await generate_response_from_parsed(qwen_messages, pil_images, max_tokens, temperature)
+
+    # Role chunk
+    yield f'data: {json.dumps({"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": model_id, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]})}\n\n'
+
+    # Content chunks
+    for word in response.split():
+        yield f'data: {json.dumps({"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": model_id, "choices": [{"index": 0, "delta": {"content": word + " "}, "finish_reason": None}]})}\n\n'
         await asyncio.sleep(0.03)
+
+    # Stop chunk
+    yield f'data: {json.dumps({"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": model_id, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})}\n\n'
+
     yield "data: [DONE]\n\n"
 
 
-async def call_openai_gpt(messages: List[Dict], max_tokens: int, temperature: float) -> str:
-    """Call OpenAI GPT API"""
-    try:
-        import openai
-        client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
-        response = await client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
+# ============================================
+# OpenAI Forwarding
+# ============================================
 
+async def openai_stream_proxy(response, model_id: str):
+    """Proxy OpenAI streaming response, replacing model ID."""
+    async for chunk in response:
+        chunk_dict = chunk.model_dump()
+        chunk_dict["model"] = model_id
+        yield f"data: {json.dumps(chunk_dict)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+async def forward_to_openai(provider: str, model_name: str, request: ChatCompletionRequest):
+    """Forward request to OpenAI API."""
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured. Set OPENAI_API_KEY env var.")
+    # Map display model names to actual upstream model IDs
+    model_name = OPENAI_MODEL
+
+    import openai
+    client_kwargs = {"api_key": OPENAI_API_KEY}
+    if OPENAI_BASE_URL:
+        client_kwargs["base_url"] = OPENAI_BASE_URL
+    client = openai.AsyncOpenAI(**client_kwargs)
+
+    # Convert messages to dicts for OpenAI
+    openai_messages = []
+    for msg in request.messages:
+        if isinstance(msg.content, str):
+            openai_messages.append({"role": msg.role, "content": msg.content})
+        else:
+            content_parts = []
+            for part in msg.content:
+                if isinstance(part, dict):
+                    content_parts.append(part)
+                else:
+                    content_parts.append(part.model_dump())
+            openai_messages.append({"role": msg.role, "content": content_parts})
+
+    if request.stream:
+        response = await client.chat.completions.create(
+            model=model_name, messages=openai_messages,
+            max_tokens=request.max_tokens, temperature=request.temperature, stream=True
+        )
+        return StreamingResponse(openai_stream_proxy(response, request.model), media_type="text/event-stream")
+
+    response = await client.chat.completions.create(
+        model=model_name, messages=openai_messages,
+        max_tokens=request.max_tokens, temperature=request.temperature
+    )
+    result = response.model_dump()
+    result["model"] = request.model
+    return result
+
+
+# ============================================
+# Endpoints
+# ============================================
 
 @app.on_event("startup")
 async def startup_event():
-    print(f"GPT Model: {OPENAI_MODEL}")
+    print(f"OpenAI Model: {OPENAI_MODEL}")
     load_model()
 
 
@@ -361,125 +508,51 @@ async def health():
     }
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    try:
-        response = await generate_response(
-            request.messages,
-            request.max_tokens,
-            request.temperature
-        )
-        return ChatResponse(
-            response=response,
-            usage={
-                "prompt_tokens": sum(len(m.content.split()) for m in request.messages),
-                "completion_tokens": len(response.split()),
-                "total_tokens": sum(len(m.content.split()) for m in request.messages) + len(response.split())
-            }
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/v1/models")
+async def list_models():
+    """List available models."""
+    models = [
+        {"id": f"local/{MODEL_NAME.split('/')[-1]}", "object": "model", "owned_by": "local"}
+    ]
+    if OPENAI_API_KEY:
+        models.append({"id": f"openai/{OPENAI_MODEL}", "object": "model", "owned_by": "openai"})
+    return {"object": "list", "data": models}
 
 
-@app.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
-    return StreamingResponse(
-        generate_stream(request.messages, request.max_tokens, request.temperature),
-        media_type="text/event-stream"
-    )
+@app.post("/v1/chat/completions")
+async def chat_completions(request: ChatCompletionRequest):
+    """Unified chat completions endpoint (OpenAI-compatible)."""
+    if request.model not in ALLOWED_MODELS:
+        raise HTTPException(status_code=403, detail=f"Model not allowed: {request.model}. Allowed: {', '.join(ALLOWED_MODELS)}")
+    provider, model_name = parse_model_id(request.model)
 
+    if provider == "openai":
+        return await forward_to_openai(provider, model_name, request)
 
-@app.post("/chat/multimodal")
-async def chat_multimodal(
-    message: str = Form(...),
-    image: Optional[UploadFile] = File(None),
-    max_tokens: int = Form(2048),
-    temperature: float = Form(0.7)
-):
-    image_base64 = None
-    if image:
-        contents = await image.read()
-        image_base64 = base64.b64encode(contents).decode()
+    if provider == "local":
+        qwen_messages, pil_images = parse_openai_messages(request.messages)
 
-    messages = [Message(role="user", content=message, image=image_base64)]
-
-    try:
-        response = await generate_response(messages, max_tokens, temperature)
-        return ChatResponse(
-            response=response,
-            usage={
-                "prompt_tokens": len(message.split()),
-                "completion_tokens": len(response.split()),
-                "total_tokens": len(message.split()) + len(response.split())
-            }
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/chat/gpt/status")
-async def gpt_status():
-    """Check GPT rate limit status"""
-    current_time = time.time()
-    elapsed = current_time - _gpt_last_call_time
-    remaining = max(0, int(GPT_RATE_LIMIT_SECONDS - elapsed)) if _gpt_last_call_time > 0 else 0
-    return {
-        "available": remaining == 0,
-        "seconds_remaining": remaining,
-        "rate_limit_seconds": GPT_RATE_LIMIT_SECONDS,
-        "model": OPENAI_MODEL
-    }
-
-
-@app.post("/chat/gpt", response_model=GPTChatResponse)
-async def chat_gpt(request: ChatRequest):
-    """Chat with GPT (rate limited: 1 call per minute)"""
-    global _gpt_last_call_time
-
-    if not OPENAI_API_KEY:
-        raise HTTPException(status_code=503, detail="OpenAI API key not configured. Set OPENAI_API_KEY env var.")
-
-    async with _gpt_rate_lock:
-        current_time = time.time()
-        elapsed = current_time - _gpt_last_call_time
-        if _gpt_last_call_time > 0 and elapsed < GPT_RATE_LIMIT_SECONDS:
-            remaining = int(GPT_RATE_LIMIT_SECONDS - elapsed)
-            raise HTTPException(
-                status_code=429,
-                detail={"message": "Rate limited", "seconds_remaining": remaining}
+        if request.stream:
+            return StreamingResponse(
+                generate_openai_stream(
+                    request.model,
+                    qwen_messages,
+                    pil_images,
+                    request.max_tokens or 2048,
+                    request.temperature or 0.7
+                ),
+                media_type="text/event-stream"
             )
-        _gpt_last_call_time = current_time
 
-    openai_messages = []
-    for m in request.messages:
-        if m.image:
-            openai_messages.append({
-                "role": m.role,
-                "content": [
-                    {"type": "text", "text": m.content},
-                    {"type": "image_url", "image_url": {
-                        "url": ensure_data_uri(m.image), "detail": "auto"
-                    }},
-                ],
-            })
-        else:
-            openai_messages.append({"role": m.role, "content": m.content})
-
-    try:
-        response = await call_openai_gpt(openai_messages, request.max_tokens, request.temperature)
-        return GPTChatResponse(
-            response=response,
-            model=OPENAI_MODEL,
-            usage={
-                "prompt_tokens": sum(len(m.content.split()) for m in request.messages),
-                "completion_tokens": len(response.split()),
-                "total_tokens": sum(len(m.content.split()) for m in request.messages) + len(response.split())
-            }
+        response_text = await generate_response_from_parsed(
+            qwen_messages,
+            pil_images,
+            request.max_tokens or 2048,
+            request.temperature or 0.7
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return build_chat_completion(request.model, response_text)
+
+    raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}. Use local/* for BioVLM or openai/* for GPT.")
 
 
 if __name__ == "__main__":

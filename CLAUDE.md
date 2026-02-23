@@ -22,23 +22,24 @@ frontend/ (vanilla HTML/CSS/JS)  →  backend/ (FastAPI, Python)
 
 ### Endpoints the Frontend Calls
 
-| Method | Endpoint         | Purpose                        |
-|--------|------------------|--------------------------------|
-| POST   | `/chat`          | BioVLM non-streaming chat      |
-| POST   | `/chat/stream`   | BioVLM streaming chat (SSE)    |
-| POST   | `/chat/gpt`      | OpenAI GPT chat                |
+| Method | Endpoint                | Purpose                                      |
+|--------|-------------------------|----------------------------------------------|
+| POST   | `/v1/chat/completions`  | Unified chat (streaming via `stream` param)  |
+| GET    | `/v1/models`            | List available models                        |
 
-All three share the same request format. The frontend selects `/chat` vs `/chat/stream` based on `CONFIG.streamMode`.
+The frontend sends all requests to `/v1/chat/completions` with a `model` field that determines routing:
+- `local/*` → BioVLM (e.g., `local/biolvlm-8b-grpo`)
+- `openai/*` → OpenAI GPT API (e.g., `openai/gpt-4o-mini`)
 
-### Request Format (all POST endpoints)
+### Request Format
 
 ```json
 {
+  "model": "local/biolvlm-8b-grpo",
   "messages": [
     {
-      "role": "user" | "assistant",
-      "content": "string",
-      "image": "base64_string | null"
+      "role": "user",
+      "content": "string or content array"
     }
   ],
   "max_tokens": 2048,
@@ -47,101 +48,108 @@ All three share the same request format. The frontend selects `/chat` vs `/chat/
 }
 ```
 
-### Response Formats
-
-**`POST /chat`** — JSON:
+Multimodal messages use content arrays:
 ```json
 {
-  "response": "assistant reply text",
-  "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 }
+  "role": "user",
+  "content": [
+    { "type": "text", "text": "Describe this image" },
+    { "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,..." } }
+  ]
 }
 ```
 
-**`POST /chat/stream`** — Server-Sent Events:
+### Response Formats
+
+**Non-streaming** — JSON:
+```json
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "created": 1700000000,
+  "model": "local/biolvlm-8b-grpo",
+  "choices": [{
+    "index": 0,
+    "message": { "role": "assistant", "content": "response text" },
+    "finish_reason": "stop"
+  }],
+  "usage": { "prompt_tokens": 0, "completion_tokens": 10, "total_tokens": 10 }
+}
 ```
-data: word1
-data: word2
+
+**Streaming** — Server-Sent Events:
+```
+data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","model":"local/biolvlm-8b-grpo","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","model":"local/biolvlm-8b-grpo","choices":[{"index":0,"delta":{"content":"Hello "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","model":"local/biolvlm-8b-grpo","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
 data: [DONE]
 ```
 
-**`POST /chat/gpt`** — JSON:
-```json
-{
-  "response": "GPT reply text",
-  "model": "gpt-4o-mini",
-  "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 }
-}
-```
-
 Error responses:
-- `429` — Rate limited: `{ "detail": { "message": "...", "seconds_remaining": N } }`
-- `503` — API key not configured: `{ "detail": "..." }`
+- `400` — Unknown provider: `{ "detail": "Unknown provider: ..." }`
+- `503` — API key not configured: `{ "detail": "OpenAI API key not configured..." }`
 
-### Backend-Only Endpoints (not called by frontend)
+### Backend-Only Endpoints
 
-| Method | Endpoint              | Purpose                          |
-|--------|-----------------------|----------------------------------|
-| GET    | `/`                   | Welcome / status                 |
-| GET    | `/health`             | Health check                     |
-| POST   | `/chat/multimodal`    | Multimodal chat via form upload  |
-| GET    | `/chat/gpt/status`    | GPT rate limit status            |
-| POST   | `/deploy`             | Deploy model (sllm backend only) |
+| Method | Endpoint    | Purpose        |
+|--------|-------------|----------------|
+| GET    | `/`         | Welcome/status |
+| GET    | `/health`   | Health check   |
 
 ## Backend → LLM Flow
 
-### BioVLM (`/chat`, `/chat/stream`)
+### Unified `/v1/chat/completions`
 
-Request → `generate_response()` in `backend/app.py:227`, which tries backends in order:
+1. `parse_model_id(request.model)` extracts `(provider, model_name)` from `provider/model_name` format
+2. If `provider == "openai"`: forwards to OpenAI API via `forward_to_openai()`
+3. If `provider == "local"`: parses messages via `parse_openai_messages()` and generates via BioVLM
+
+### BioVLM (local/* models)
+
+Request → `parse_openai_messages()` converts OpenAI format to Qwen-VL format → `generate_response_from_parsed()` tries backends in order:
 
 1. **vLLM** (preferred) — uses `processor.apply_chat_template()` to build prompt with image placeholders, then `llm_engine.generate()` with `multi_modal_data={"image": pil_images}` when images are present
 2. **ServerlessLLM** — loads model via `sllm_store.transformers.load_model()`, then uses transformers generate
 3. **Transformers** — uses `processor.apply_chat_template()` + `processor()` for combined text+image encoding when images present, falls back to tokenizer-only for text
 4. **Mock** (fallback) — returns canned response after 0.5s delay, acknowledges received images
 
-Prompt construction:
-- **With `AutoProcessor`** (default): Uses `processor.apply_chat_template()` for proper Qwen-VL chat format with image tokens
-- **Without processor** (fallback): Naive `User:/Assistant:` concatenation (text-only)
+### GPT (openai/* models)
 
-Image handling in `generate_response()`:
-- `build_multimodal_messages()` converts `List[Message]` to Qwen-VL format, decoding base64 images to PIL via `base64_to_pil()`
-- vLLM receives images via `multi_modal_data` parameter
-- Transformers receives images via `processor(text=..., images=...)` call
-
-Streaming (`/chat/stream`): generates full response first, then yields word-by-word as SSE. Not true token streaming.
-
-### GPT (`/chat/gpt`)
-
-1. Rate limit check — 60s cooldown enforced via async lock (`app.py:442`)
-2. Messages mapped to OpenAI format — text-only messages use `{"role": ..., "content": "..."}`, image messages use vision format with `{"type": "image_url", "image_url": {"url": "data:...", "detail": "auto"}}` (`app.py:453-466`)
-3. Calls `openai.AsyncOpenAI.chat.completions.create()` (`app.py:321`)
+1. Messages converted to OpenAI format (already mostly compatible)
+2. `forward_to_openai()` calls `openai.AsyncOpenAI.chat.completions.create()`
+3. For streaming: proxied via `openai_stream_proxy()` with model ID replacement
+4. For non-streaming: response returned with model ID replaced to keep `openai/` prefix
 
 ### Known Gaps
 
-- **Fake streaming** — full generation then word-by-word drip
+- **Fake streaming** — full generation then word-by-word drip (for local models)
 - **Token counts are word counts** — `len(text.split())` used for usage stats
 
 ## Frontend Config
 
 Stored in `localStorage`, defaults in `frontend/js/app.js`:
 
-| Key            | Default                  |
-|----------------|--------------------------|
-| `apiEndpoint`  | `http://localhost:3001`  |
-| `temperature`  | `0.7`                    |
-| `maxTokens`    | `2048`                   |
-| `streamMode`   | `false`                  |
-| `openaiApiKey` | `""`                     |
-| `gptModel`     | `gpt-5-mini`             |
+| Key            | Default                      |
+|----------------|------------------------------|
+| `apiEndpoint`  | `http://localhost:3001`      |
+| `temperature`  | `0.7`                        |
+| `maxTokens`    | `2048`                       |
+| `streamMode`   | `false`                      |
+| `biovlmModel`  | `local/biolvlm-8b-grpo`     |
+| `gptModel`     | `openai/gpt-4o-mini`        |
 
 ## Key Files
 
 ```
-backend/app.py          — Main FastAPI backend
+backend/app.py          — Main FastAPI backend (OpenAI-compatible API)
 backend/app_sllm.py     — ServerlessLLM variant backend
 frontend/js/app.js      — All frontend logic (API calls, UI)
 frontend/css/style.css   — Styles
 frontend/index.html      — Single page
-mock_server.py           — Dev mock server (port 3001)
+mock_server.py           — Dev mock server (port 3001, OpenAI-compatible)
 nginx.conf               — Nginx config for production
 docker-compose.yml       — Docker deployment
 ```

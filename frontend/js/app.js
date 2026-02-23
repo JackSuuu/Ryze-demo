@@ -7,12 +7,12 @@
 // ============================================
 
 const CONFIG = {
-    apiEndpoint: localStorage.getItem('apiEndpoint') || 'http://localhost:3001',
+    apiEndpoint: localStorage.getItem('apiEndpoint') || 'http://localhost:8000',
     temperature: parseFloat(localStorage.getItem('temperature')) || 0.7,
     maxTokens: parseInt(localStorage.getItem('maxTokens')) || 2048,
     streamMode: localStorage.getItem('streamMode') === 'true',
-    openaiApiKey: localStorage.getItem('openaiApiKey') || '',
-    gptModel: localStorage.getItem('gptModel') || 'gpt-5-mini'
+    biovlmModel: 'local/biolvlm-8b-grpo',
+    gptModel: 'openai/gpt-5-mini'
 };
 
 const STATE = {
@@ -92,8 +92,6 @@ const elements = {
     tempValue: document.getElementById('tempValue'),
     maxTokensInput: document.getElementById('maxTokens'),
     streamModeInput: document.getElementById('streamMode'),
-    openaiApiKeyInput: document.getElementById('openaiApiKey'),
-    gptModelInput: document.getElementById('gptModel')
 };
 
 // ============================================
@@ -148,8 +146,75 @@ function loadSettings() {
     elements.tempValue.textContent = CONFIG.temperature;
     elements.maxTokensInput.value = CONFIG.maxTokens;
     elements.streamModeInput.checked = CONFIG.streamMode;
-    elements.openaiApiKeyInput.value = CONFIG.openaiApiKey;
-    elements.gptModelInput.value = CONFIG.gptModel;
+}
+
+// ============================================
+// Unified API Request (OpenAI-compatible)
+// ============================================
+
+async function sendChatRequest(model, messages, stream = false) {
+    const openaiMessages = messages.map(m => {
+        if (m.image) {
+            return {
+                role: m.role,
+                content: [
+                    { type: "text", text: m.content || "" },
+                    { type: "image_url", image_url: { url: m.image } }
+                ]
+            };
+        }
+        return { role: m.role, content: m.content };
+    });
+
+    const body = {
+        model: model,
+        messages: openaiMessages,
+        max_tokens: CONFIG.maxTokens,
+        temperature: CONFIG.temperature,
+        stream: stream
+    };
+
+    const response = await fetch(`${CONFIG.apiEndpoint}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP ${response.status}`);
+    }
+
+    if (stream) {
+        return readOpenAIStream(response);
+    }
+
+    const data = await response.json();
+    return data.choices[0].message.content;
+}
+
+async function readOpenAIStream(response) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let result = '';
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        for (const line of chunk.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            const data = line.slice(6).trim();
+            if (data === '[DONE]') return result;
+            try {
+                const parsed = JSON.parse(data);
+                const delta = parsed.choices?.[0]?.delta?.content;
+                if (delta) result += delta;
+            } catch {}
+        }
+    }
+    return result;
 }
 
 // ============================================
@@ -212,22 +277,16 @@ async function sendMessage() {
     // Fire both requests in parallel
     const messagesToSend = [...session.messages];
     const [biolvlmResult, gptResult] = await Promise.allSettled([
-        sendBioVLMRequest(messagesToSend),
-        sendGPTRequest(messagesToSend)
+        sendChatRequest(CONFIG.biovlmModel, messagesToSend, CONFIG.streamMode),
+        sendChatRequest(CONFIG.gptModel, messagesToSend, false)
     ]);
 
     // Replace loading bubble with response — Baseline (GPT/OpenAI, left panel)
     baselineLoading.remove();
     if (gptResult.status === 'fulfilled') {
-        appendAssistantBubble(elements.baselineChat, gptResult.value.response);
+        appendAssistantBubble(elements.baselineChat, gptResult.value);
     } else {
-        const err = gptResult.reason;
-        if (err.type === 'rate_limit') {
-            const bubble = appendAssistantBubble(elements.baselineChat, null);
-            showRateLimitCountdown(bubble, err.secondsRemaining);
-        } else {
-            appendAssistantBubble(elements.baselineChat, null, err.message);
-        }
+        appendAssistantBubble(elements.baselineChat, null, gptResult.reason.message);
     }
 
     // Replace loading bubble with response — BioVLM (right panel)
@@ -526,136 +585,6 @@ function highlightSidebarItem(sessionId) {
 }
 
 // ============================================
-// BioVLM API Request
-// ============================================
-
-async function sendBioVLMRequest(messages) {
-    const endpoint = CONFIG.streamMode
-        ? `${CONFIG.apiEndpoint}/chat/stream`
-        : `${CONFIG.apiEndpoint}/chat`;
-
-    const body = {
-        messages: messages.map(m => ({
-            role: m.role,
-            content: m.content,
-            image: m.image || null
-        })),
-        max_tokens: CONFIG.maxTokens,
-        temperature: CONFIG.temperature,
-        stream: CONFIG.streamMode
-    };
-
-    const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-    });
-
-    if (!response.ok) {
-        throw new Error(`BioVLM HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    if (CONFIG.streamMode) {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let result = '';
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value);
-            const lines = chunk.split('\n');
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.slice(6).trim();
-                    if (data === '[DONE]') break;
-                    result += data;
-                }
-            }
-        }
-
-        return result;
-    } else {
-        const data = await response.json();
-        return data.response;
-    }
-}
-
-// ============================================
-// GPT API Request
-// ============================================
-
-async function sendGPTRequest(messages) {
-    const response = await fetch(`${CONFIG.apiEndpoint}/chat/gpt`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            messages: messages.map(m => ({
-                role: m.role,
-                content: m.content,
-                image: m.image || null
-            })),
-            max_tokens: CONFIG.maxTokens,
-            temperature: CONFIG.temperature
-        })
-    });
-
-    if (response.status === 429) {
-        const data = await response.json();
-        const detail = data.detail || {};
-        const err = new Error(detail.message || 'Rate limited');
-        err.type = 'rate_limit';
-        err.secondsRemaining = detail.seconds_remaining || 60;
-        throw err;
-    }
-
-    if (response.status === 503) {
-        const data = await response.json();
-        throw new Error(data.detail || 'GPT service unavailable');
-    }
-
-    if (!response.ok) {
-        throw new Error(`GPT HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    return response.json();
-}
-
-// ============================================
-// Rate Limit Countdown
-// ============================================
-
-function showRateLimitCountdown(panelEl, secondsRemaining) {
-    let remaining = secondsRemaining;
-
-    panelEl.innerHTML = `
-        <div class="rate-limit-notice">
-            <i class="fas fa-clock"></i>
-            <span>Rate limited &mdash; next call in <span class="countdown">${remaining}s</span></span>
-        </div>
-    `;
-
-    const countdownEl = panelEl.querySelector('.countdown');
-
-    const interval = setInterval(() => {
-        remaining--;
-        if (remaining <= 0) {
-            clearInterval(interval);
-            panelEl.innerHTML = `
-                <div class="rate-limit-ready">
-                    <i class="fas fa-check-circle"></i>
-                    <span>Ready &mdash; send a new message to use GPT</span>
-                </div>
-            `;
-        } else if (countdownEl) {
-            countdownEl.textContent = `${remaining}s`;
-        }
-    }, 1000);
-}
-
-// ============================================
 // Format Message Content
 // ============================================
 
@@ -754,15 +683,10 @@ function saveSettings() {
     CONFIG.temperature = parseFloat(elements.temperatureInput.value);
     CONFIG.maxTokens = parseInt(elements.maxTokensInput.value);
     CONFIG.streamMode = elements.streamModeInput.checked;
-    CONFIG.openaiApiKey = elements.openaiApiKeyInput.value;
-    CONFIG.gptModel = elements.gptModelInput.value || 'gpt-5-mini';
-
     localStorage.setItem('apiEndpoint', CONFIG.apiEndpoint);
     localStorage.setItem('temperature', CONFIG.temperature);
     localStorage.setItem('maxTokens', CONFIG.maxTokens);
     localStorage.setItem('streamMode', CONFIG.streamMode);
-    localStorage.setItem('openaiApiKey', CONFIG.openaiApiKey);
-    localStorage.setItem('gptModel', CONFIG.gptModel);
 
     updateBaselineLabel();
     closeSettings();
@@ -775,7 +699,7 @@ function updateTempDisplay() {
 
 function updateBaselineLabel() {
     const label = document.getElementById('baselineLabel');
-    if (label) label.textContent = CONFIG.gptModel;
+    if (label) label.textContent = 'GPT 5 Mini';
 }
 
 // ============================================

@@ -99,15 +99,7 @@
             <div class="modal-body">
                 <div class="setting-group">
                     <label>API Endpoint</label>
-                    <input type="text" id="apiEndpoint" value="http://localhost:3001">
-                </div>
-                <div class="setting-group">
-                    <label>OpenAI API Key</label>
-                    <input type="password" id="openaiApiKey" placeholder="sk-...">
-                </div>
-                <div class="setting-group">
-                    <label>GPT Model</label>
-                    <input type="text" id="gptModel" placeholder="e.g. gpt-4o-mini">
+                    <input type="text" id="apiEndpoint" value="http://localhost:8000">
                 </div>
                 <div class="setting-group">
                     <label>Temperature</label>
@@ -121,7 +113,7 @@
                     <input type="number" id="maxTokens" value="2048" min="1" max="8192">
                 </div>
                 <div class="setting-group">
-                    <label>Streaming (BioVLM only)</label>
+                    <label>Streaming</label>
                     <label class="switch">
                         <input type="checkbox" id="streamMode" checked>
                         <span class="slider-toggle"></span>
