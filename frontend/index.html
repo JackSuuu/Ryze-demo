@@ -4,154 +4,84 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BioVLM</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-    <div class="bg-animation"></div>
-
     <div class="app-container">
         <!-- Sidebar -->
         <aside class="sidebar" id="sidebar">
-            <div class="sidebar-header">
-                <div class="logo">
-                    <div class="logo-icon">
-                        <i class="fas fa-dna"></i>
-                    </div>
-                    <span class="logo-text">BioVLM</span>
-                </div>
-                <button class="sidebar-toggle" id="sidebarToggle">
-                    <i class="fas fa-bars"></i>
-                </button>
-            </div>
-
-            <button class="new-chat-btn" id="newChatBtn">
-                <i class="fas fa-plus"></i>
-                <span>New Chat</span>
+            <button class="new-chat-btn" id="newChatBtn" title="New Chat">
+                <i class="fas fa-plus"></i> New Chat
             </button>
-
             <div class="chat-history" id="chatHistory">
-                <div class="history-section">
-                    <h3>Today</h3>
-                    <div class="history-item active">
-                        <i class="fas fa-message"></i>
-                        <span>New Chat</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="sidebar-footer">
-                <div class="model-info">
-                    <div class="model-badge">
-                        <i class="fas fa-microchip"></i>
-                        <span>BioVLM-8B</span>
-                    </div>
-                    <div class="model-status online">
-                        <span class="status-dot"></span>
-                        Online
-                    </div>
-                </div>
             </div>
         </aside>
 
-        <!-- Main Chat Area -->
-        <main class="chat-main">
-            <header class="chat-header">
-                <div class="header-left">
-                    <button class="mobile-menu-btn" id="mobileMenuBtn">
-                        <i class="fas fa-bars"></i>
-                    </button>
-                    <h1>BioVLM</h1>
-                    <span class="beta-badge">BETA</span>
-                </div>
-                <div class="header-right">
-                    <button class="header-btn" id="settingsBtn" title="Settings">
-                        <i class="fas fa-cog"></i>
-                    </button>
-                    <button class="header-btn" id="themeBtn" title="Toggle Theme">
-                        <i class="fas fa-sun"></i>
-                    </button>
-                </div>
+        <!-- Main Area -->
+        <main class="main-area">
+            <!-- Header with panel labels -->
+            <header class="panel-header">
+                <div class="header-label label-baseline" id="baselineLabel">Baseline</div>
+                <div class="header-label label-us">BioVLM</div>
+                <button class="settings-btn" id="settingsBtn" title="Settings">
+                    <i class="fas fa-gear"></i>
+                </button>
             </header>
 
-            <div class="chat-messages" id="chatMessages">
-                <div class="welcome-screen" id="welcomeScreen">
-                    <div class="welcome-logo">
-                        <div class="welcome-icon">
-                            <i class="fas fa-dna"></i>
+            <!-- Comparison Panels -->
+            <div class="comparison-area" id="comparisonArea">
+                <div class="panel" id="panelBaseline">
+                    <div class="panel-chat" id="baselineChat">
+                        <div class="panel-empty">
+                            <i class="fas fa-robot"></i>
+                            <span>OpenAI responses appear here</span>
                         </div>
-                        <h2>How can I help you today?</h2>
-                        <p>BioVLM is a multimodal AI assistant that understands text and images.</p>
                     </div>
-
-                    <div class="feature-cards">
-                        <div class="feature-card" onclick="useSuggestion('Analyze this medical image for me')">
-                            <div class="feature-icon">
-                                <i class="fas fa-image"></i>
-                            </div>
-                            <h3>Image Analysis</h3>
-                            <p>Upload images for analysis and description</p>
-                        </div>
-                        <div class="feature-card" onclick="useSuggestion('Explain the mechanisms of CRISPR gene editing')">
-                            <div class="feature-icon">
-                                <i class="fas fa-lightbulb"></i>
-                            </div>
-                            <h3>Smart Q&amp;A</h3>
-                            <p>Get clear answers to complex questions</p>
-                        </div>
-                        <div class="feature-card" onclick="useSuggestion('Write a Python script to parse FASTA sequences')">
-                            <div class="feature-icon">
-                                <i class="fas fa-code"></i>
-                            </div>
-                            <h3>Code Assistant</h3>
-                            <p>Help with coding, debugging, and more</p>
-                        </div>
-                        <div class="feature-card" onclick="useSuggestion('Summarize the key findings in genomics research')">
-                            <div class="feature-icon">
-                                <i class="fas fa-book"></i>
-                            </div>
-                            <h3>Research Helper</h3>
-                            <p>Summarize and explain topics</p>
+                </div>
+                <div class="panel" id="panelUs">
+                    <div class="panel-chat" id="usChat">
+                        <div class="panel-empty">
+                            <i class="fas fa-dna"></i>
+                            <span>BioVLM responses appear here</span>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <div class="chat-input-container">
-                <div class="input-wrapper">
-                    <div class="image-preview-container" id="imagePreviewContainer" style="display: none;">
-                        <div class="image-preview">
+            <!-- Input Bar -->
+            <div class="input-bar" id="inputBar">
+                <div class="input-bar-inner" id="inputBarInner">
+                    <!-- Image preview row (above text) -->
+                    <div class="input-preview-row" id="inputPreviewRow" style="display:none;">
+                        <div class="input-preview-thumb" id="inlinePreview">
                             <img id="imagePreview" src="" alt="Preview">
-                            <button class="remove-image-btn" id="removeImageBtn">
-                                <i class="fas fa-times"></i>
-                            </button>
+                            <button class="remove-preview-btn" id="removeImageBtn"><i class="fas fa-times"></i></button>
                         </div>
                     </div>
-
-                    <div class="input-tools">
-                        <button class="tool-btn" id="uploadBtn" title="Upload Image">
+                    <!-- Text + buttons row -->
+                    <div class="input-text-row">
+                        <button class="upload-btn" id="uploadBtn" title="Upload image">
                             <i class="fas fa-image"></i>
                         </button>
-                        <input type="file" id="imageInput" accept="image/*" style="display: none;">
-                    </div>
-
-                    <div class="input-field-wrapper">
-                        <textarea
+                        <input
+                            type="text"
                             id="messageInput"
-                            placeholder="Message BioVLM..."
-                            rows="1"
-                            maxlength="10000"
-                        ></textarea>
-                        <div class="char-counter" id="charCounter">0 / 10000</div>
+                            placeholder="User Input (Support user upload image)"
+                            autocomplete="off"
+                        >
+                        <input type="file" id="imageInput" accept="image/*" style="display:none;">
+                        <button class="send-btn" id="sendBtn" disabled>
+                            <i class="fas fa-arrow-right"></i>
+                        </button>
                     </div>
-
-                    <button class="send-btn" id="sendBtn" disabled>
-                        <i class="fas fa-arrow-up"></i>
-                    </button>
                 </div>
-
-                <div class="input-footer">
-                    <span>Powered by BioVLM + GPT &nbsp;|&nbsp; Responses shown side by side</span>
+                <div class="drop-overlay" id="dropOverlay">
+                    <i class="fas fa-cloud-upload-alt"></i>
+                    <span>Drop image here</span>
                 </div>
             </div>
         </main>
