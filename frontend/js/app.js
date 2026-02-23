@@ -7,10 +7,10 @@
 // ============================================
 
 const CONFIG = {
-    apiEndpoint: localStorage.getItem('apiEndpoint') || 'http://localhost:8000',
+    apiEndpoint: localStorage.getItem('apiEndpoint') || 'http://localhost:3001',
     temperature: parseFloat(localStorage.getItem('temperature')) || 0.7,
     maxTokens: parseInt(localStorage.getItem('maxTokens')) || 2048,
-    streamMode: localStorage.getItem('streamMode') !== 'false'
+    streamMode: localStorage.getItem('streamMode') === 'true'  // Default to non-streaming
 };
 
 const STATE = {
