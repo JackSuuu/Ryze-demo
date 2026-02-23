@@ -1,0 +1,82 @@
+services:
+  # ServerlessLLM Head Node
+  sllm_head:
+    image: serverlessllm/sllm:latest
+    container_name: sllm_head
+    environment:
+      - MODEL_FOLDER=/models
+      - MODE=HEAD
+      - HF_TOKEN=${HF_TOKEN}
+    ports:
+      - "6379:6379"    # Redis port
+      - "8343:8343"    # ServerlessLLM API port
+    networks:
+      - sllm_network
+    volumes:
+      - ${MODEL_FOLDER:-./models}:/models
+    command: []
+    restart: unless-stopped
+
+  # ServerlessLLM Worker Node (GPU)
+  sllm_worker_0:
+    image: serverlessllm/sllm:latest
+    container_name: sllm_worker_0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: ["gpu"]
+              device_ids: ["0"]
+    environment:
+      - WORKER_ID=0
+      - STORAGE_PATH=/models
+      - MODE=WORKER
+      - HF_TOKEN=${HF_TOKEN}
+    networks:
+      - sllm_network
+    volumes:
+      - ${MODEL_FOLDER:-./models}:/models
+    depends_on:
+      - sllm_head
+    command: ["--mem-pool-size", "16GB", "--registration-required", "true"]
+    restart: unless-stopped
+
+  # Ryze Chatbot Backend (connects to ServerlessLLM)
+  ryze_backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.sllm
+    container_name: ryze_backend
+    environment:
+      - LLM_SERVER_URL=http://sllm_head:8343
+      - MODEL_NAME=chivier/qwen3-vl-8b-grpo
+      - HF_TOKEN=${HF_TOKEN}
+    ports:
+      - "8000:8000"
+    networks:
+      - sllm_network
+    depends_on:
+      - sllm_head
+      - sllm_worker_0
+    restart: unless-stopped
+
+  # Ryze Frontend
+  ryze_frontend:
+    image: nginx:alpine
+    container_name: ryze_frontend
+    ports:
+      - "3000:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+      - ./nginx.sllm.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - ryze_backend
+    networks:
+      - sllm_network
+    restart: unless-stopped
+
+networks:
+  sllm_network:
+    driver: bridge
+    name: sllm

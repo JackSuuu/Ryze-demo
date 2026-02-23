@@ -1,0 +1,18 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install dependencies
+COPY requirements.sllm.txt .
+RUN pip install --no-cache-dir -r requirements.sllm.txt
+
+# Copy application
+COPY app_sllm.py ./app.py
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
