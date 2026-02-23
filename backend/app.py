@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import uvicorn
+from io import BytesIO
 
 # Check for HuggingFace token
 HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
@@ -38,6 +39,12 @@ try:
     print("Transformers is available")
 except ImportError:
     print("Transformers not installed")
+
+try:
+    from PIL import Image as PILImage
+except ImportError:
+    PILImage = None
+    print("Pillow not installed")
 
 # vLLM support (recommended for production)
 VLLM_AVAILABLE = False
@@ -111,7 +118,16 @@ def load_model():
                 trust_remote_code=True,
                 dtype="bfloat16",
                 max_model_len=4096,
+                limit_mm_per_prompt={"image": 4},
             )
+            if TRANSFORMERS_AVAILABLE:
+                try:
+                    processor = AutoProcessor.from_pretrained(
+                        MODEL_NAME, trust_remote_code=True, token=HF_TOKEN
+                    )
+                    print("Processor loaded for vLLM multimodal support")
+                except Exception as pe:
+                    print(f"Processor loading failed (text-only mode): {pe}")
             print("Model loaded successfully via vLLM!")
             return True
         except Exception as e:
@@ -133,11 +149,19 @@ def load_model():
     if TRANSFORMERS_AVAILABLE:
         print(f"Loading model {MODEL_NAME} via transformers...")
         try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                MODEL_NAME,
-                trust_remote_code=True,
-                token=HF_TOKEN
-            )
+            # Try AutoProcessor first (wraps tokenizer + image processor)
+            try:
+                processor = AutoProcessor.from_pretrained(
+                    MODEL_NAME, trust_remote_code=True, token=HF_TOKEN
+                )
+                tokenizer = processor.tokenizer
+                print("AutoProcessor loaded (multimodal support enabled)")
+            except Exception:
+                processor = None
+                tokenizer = AutoTokenizer.from_pretrained(
+                    MODEL_NAME, trust_remote_code=True, token=HF_TOKEN
+                )
+                print("Falling back to AutoTokenizer (text-only)")
             model = AutoModelForCausalLM.from_pretrained(
                 MODEL_NAME,
                 torch_dtype=torch.bfloat16,
@@ -161,16 +185,51 @@ def process_image(image_base64: str) -> bytes:
     return base64.b64decode(image_base64)
 
 
+def base64_to_pil(image_base64: str) -> "PILImage.Image":
+    """Decode a base64 image string to a PIL Image in RGB."""
+    raw = process_image(image_base64)
+    return PILImage.open(BytesIO(raw)).convert("RGB")
+
+
+def ensure_data_uri(image_base64: str) -> str:
+    """Ensure a base64 string has a data URI prefix (needed by OpenAI)."""
+    if image_base64.startswith("data:"):
+        return image_base64
+    return f"data:image/jpeg;base64,{image_base64}"
+
+
+def build_multimodal_messages(messages: List[Message]):
+    """Convert List[Message] to Qwen-VL chat format with PIL images.
+
+    Returns:
+        (qwen_messages, pil_images) where qwen_messages is the structured
+        list for apply_chat_template and pil_images is a flat list of PIL
+        images in order of appearance.
+    """
+    qwen_messages = []
+    pil_images = []
+    for msg in messages:
+        if msg.image and PILImage is not None:
+            pil_img = base64_to_pil(msg.image)
+            pil_images.append(pil_img)
+            qwen_messages.append({
+                "role": msg.role,
+                "content": [
+                    {"type": "image", "image": pil_img},
+                    {"type": "text", "text": msg.content},
+                ],
+            })
+        else:
+            qwen_messages.append({"role": msg.role, "content": msg.content})
+    return qwen_messages, pil_images
+
+
 async def generate_response(messages: List[Message], max_tokens: int, temperature: float) -> str:
     """Generate response from BioVLM"""
     global model, tokenizer, llm_engine
 
-    # Build prompt
-    prompt_parts = []
-    for msg in messages:
-        role = "User" if msg.role == "user" else "Assistant"
-        prompt_parts.append(f"{role}: {msg.content}")
-    prompt = "\n".join(prompt_parts) + "\nAssistant:"
+    qwen_messages, pil_images = build_multimodal_messages(messages)
+    has_images = len(pil_images) > 0
 
     # vLLM generation
     if llm_engine is not None:
@@ -178,12 +237,46 @@ async def generate_response(messages: List[Message], max_tokens: int, temperatur
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        outputs = llm_engine.generate([prompt], sampling_params)
+        if processor is not None:
+            prompt = processor.apply_chat_template(
+                qwen_messages, tokenize=False, add_generation_prompt=True
+            )
+            mm_data = {"image": pil_images} if has_images else None
+            outputs = llm_engine.generate(
+                [prompt], sampling_params, multi_modal_data=mm_data
+            )
+        else:
+            # Fallback: naive text prompt (no image support without processor)
+            prompt_parts = []
+            for msg in messages:
+                role = "User" if msg.role == "user" else "Assistant"
+                prompt_parts.append(f"{role}: {msg.content}")
+            prompt = "\n".join(prompt_parts) + "\nAssistant:"
+            outputs = llm_engine.generate([prompt], sampling_params)
         return outputs[0].outputs[0].text.strip()
 
     # Transformers generation
     if model is not None and tokenizer is not None:
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        if processor is not None and has_images:
+            prompt = processor.apply_chat_template(
+                qwen_messages, tokenize=False, add_generation_prompt=True
+            )
+            inputs = processor(
+                text=[prompt], images=pil_images, return_tensors="pt", padding=True
+            ).to(model.device)
+        else:
+            if processor is not None:
+                prompt = processor.apply_chat_template(
+                    qwen_messages, tokenize=False, add_generation_prompt=True
+                )
+            else:
+                prompt_parts = []
+                for msg in messages:
+                    role = "User" if msg.role == "user" else "Assistant"
+                    prompt_parts.append(f"{role}: {msg.content}")
+                prompt = "\n".join(prompt_parts) + "\nAssistant:"
+            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
@@ -198,10 +291,13 @@ async def generate_response(messages: List[Message], max_tokens: int, temperatur
     # Mock response
     await asyncio.sleep(0.5)
     user_msg = messages[-1].content if messages else "Hello"
+    image_note = ""
+    if has_images:
+        image_note = f"\n\n[I received {len(pil_images)} image(s) with your message. In production mode, I would analyze them using my vision capabilities.]"
     mock_responses = [
-        f"Thank you for your message! As BioVLM, I received your question: \"{user_msg}\"\n\nI'm an AI assistant. Currently running in demo mode.",
-        f"Hello! I'm BioVLM, a vision-language AI assistant.\n\nRegarding your question \"{user_msg}\", I can analyze it from multiple perspectives. What aspects would you like me to focus on?",
-        f"Got it! Processing your request: \"{user_msg}\"\n\nAs a multimodal AI, I can understand both text and images. How can I help you today?"
+        f"Thank you for your message! As BioVLM, I received your question: \"{user_msg}\"\n\nI'm an AI assistant. Currently running in demo mode.{image_note}",
+        f"Hello! I'm BioVLM, a vision-language AI assistant.\n\nRegarding your question \"{user_msg}\", I can analyze it from multiple perspectives. What aspects would you like me to focus on?{image_note}",
+        f"Got it! Processing your request: \"{user_msg}\"\n\nAs a multimodal AI, I can understand both text and images. How can I help you today?{image_note}"
     ]
     import random
     return random.choice(mock_responses)
@@ -354,7 +450,20 @@ async def chat_gpt(request: ChatRequest):
             )
         _gpt_last_call_time = current_time
 
-    openai_messages = [{"role": m.role, "content": m.content} for m in request.messages]
+    openai_messages = []
+    for m in request.messages:
+        if m.image:
+            openai_messages.append({
+                "role": m.role,
+                "content": [
+                    {"type": "text", "text": m.content},
+                    {"type": "image_url", "image_url": {
+                        "url": ensure_data_uri(m.image), "detail": "auto"
+                    }},
+                ],
+            })
+        else:
+            openai_messages.append({"role": m.role, "content": m.content})
 
     try:
         response = await call_openai_gpt(openai_messages, request.max_tokens, request.temperature)
