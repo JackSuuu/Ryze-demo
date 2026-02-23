@@ -24,11 +24,29 @@ const STATE = {
 
 let _sessionCounter = 0;
 
-// Bootstrap with one empty session
-(function initFirstSession() {
-    const session = createSession();
-    STATE.sessions.push(session);
-    STATE.currentSessionId = session.id;
+const STORAGE_KEY = 'biovlm_sessions';
+const STORAGE_ACTIVE_KEY = 'biovlm_activeSession';
+
+// Load saved sessions or bootstrap with one empty session
+(function initSessions() {
+    const loaded = loadFromStorage();
+    if (loaded && loaded.length > 0) {
+        STATE.sessions = loaded;
+        // Derive counter from existing IDs to avoid collisions
+        _sessionCounter = loaded.reduce((max, s) => {
+            const match = s.id.match(/_(\d+)$/);
+            return match ? Math.max(max, parseInt(match[1])) : max;
+        }, 0);
+        // Restore last active session, or fallback to most recent
+        const savedActiveId = localStorage.getItem(STORAGE_ACTIVE_KEY);
+        const activeSession = loaded.find(s => s.id === savedActiveId) || loaded[loaded.length - 1];
+        STATE.currentSessionId = activeSession.id;
+    } else {
+        const session = createSession();
+        STATE.sessions.push(session);
+        STATE.currentSessionId = session.id;
+        persistToStorage();
+    }
 })();
 
 // ============================================
@@ -87,6 +105,10 @@ document.addEventListener('DOMContentLoaded', () => {
     loadSettings();
     updateBaselineLabel();
     renderSidebar();
+
+    // Restore the active session's panel HTML
+    const active = getCurrentSession();
+    if (active) restoreSession(active);
 });
 
 function initEventListeners() {
@@ -315,6 +337,45 @@ function saveCurrentSession() {
     if (!session) return;
     session.baselineHtml = elements.baselineChat.innerHTML;
     session.usHtml = elements.usChat.innerHTML;
+    persistToStorage();
+}
+
+// ============================================
+// LocalStorage Persistence
+// ============================================
+
+function persistToStorage() {
+    const data = JSON.stringify(STATE.sessions);
+    let retries = 3;
+    while (retries > 0) {
+        try {
+            localStorage.setItem(STORAGE_KEY, data);
+            localStorage.setItem(STORAGE_ACTIVE_KEY, STATE.currentSessionId);
+            return;
+        } catch (e) {
+            if (e.name === 'QuotaExceededError' && STATE.sessions.length > 1) {
+                // Drop the oldest session and retry
+                const dropped = STATE.sessions.shift();
+                showToast(`Dropped oldest session "${dropped.title}" to free space`, 'warning');
+                retries--;
+            } else {
+                console.warn('Failed to persist sessions:', e);
+                return;
+            }
+        }
+    }
+}
+
+function loadFromStorage() {
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch (e) {
+        console.warn('Failed to load sessions from storage:', e);
+    }
+    return null;
 }
 
 function restoreSession(session) {
@@ -353,6 +414,8 @@ function newChat() {
     // Add to sidebar and highlight
     addSidebarItem(session);
     highlightSidebarItem(session.id);
+
+    persistToStorage();
 }
 
 // ============================================
@@ -426,7 +489,10 @@ function switchToSession(sessionId) {
 
     saveCurrentSession();
     const session = STATE.sessions.find(s => s.id === sessionId);
-    if (session) restoreSession(session);
+    if (session) {
+        restoreSession(session);
+        persistToStorage();
+    }
 }
 
 function deleteSession(sessionId) {
@@ -450,6 +516,7 @@ function deleteSession(sessionId) {
     if (item) item.remove();
 
     highlightSidebarItem(STATE.currentSessionId);
+    persistToStorage();
 }
 
 function highlightSidebarItem(sessionId) {
