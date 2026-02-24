@@ -253,7 +253,7 @@ function isByokEnabled() {
 
 async function sendDirectOpenAIRequest(messages, stream = false, onToken = null) {
     const baseUrl = (CONFIG.byokBaseUrl || 'https://api.openai.com').replace(/\/+$/, '').replace(/\/v1$/, '');
-    const model = CONFIG.byokModelName || 'gpt-4o-mini';
+    const model = CONFIG.byokModelName || 'gpt-5-mini';
 
     const openaiMessages = messages.map(m => {
         if (m.image) {
