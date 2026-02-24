@@ -56,7 +56,12 @@
             <div class="input-bar" id="inputBar">
                 <div class="input-bar-inner" id="inputBarInner">
                     <!-- Image preview row (above text) -->
-                    <div class="input-preview-row" id="inputPreviewRow" style="display:none;">
+                    <div class="input-preview-row" id="inputPreviewRow">
+                        <!-- Drop placeholder: visible while dragging, hidden when image loaded -->
+                        <div class="drag-drop-placeholder" id="dragDropPlaceholder">
+                            <i class="fas fa-cloud-upload-alt"></i>
+                            <span>Drop image here</span>
+                        </div>
                         <div class="input-preview-thumb" id="inlinePreview">
                             <img id="imagePreview" src="" alt="Preview">
                             <button class="remove-preview-btn" id="removeImageBtn"><i class="fas fa-times"></i></button>

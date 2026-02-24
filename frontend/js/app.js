@@ -10,7 +10,7 @@ const CONFIG = {
     apiEndpoint: localStorage.getItem('apiEndpoint') || 'http://localhost:8000',
     temperature: parseFloat(localStorage.getItem('temperature')) || 0.7,
     maxTokens: parseInt(localStorage.getItem('maxTokens')) || 2048,
-    streamMode: localStorage.getItem('streamMode') === 'true',
+    streamMode: localStorage.getItem('streamMode') !== 'false', // default on
     biovlmModel: 'local/biolvlm-8b-grpo',
     gptModel: 'openai/gpt-5-mini'
 };
@@ -27,7 +27,7 @@ let _sessionCounter = 0;
 const STORAGE_KEY = 'biovlm_sessions';
 const STORAGE_ACTIVE_KEY = 'biovlm_activeSession';
 
-// Load saved sessions or bootstrap with one empty session
+// Load saved sessions; if the last active session is non-empty, auto-create a fresh one
 (function initSessions() {
     const loaded = loadFromStorage();
     if (loaded && loaded.length > 0) {
@@ -40,7 +40,16 @@ const STORAGE_ACTIVE_KEY = 'biovlm_activeSession';
         // Restore last active session, or fallback to most recent
         const savedActiveId = localStorage.getItem(STORAGE_ACTIVE_KEY);
         const activeSession = loaded.find(s => s.id === savedActiveId) || loaded[loaded.length - 1];
-        STATE.currentSessionId = activeSession.id;
+
+        // Page load: if the session has content, auto-create a blank one
+        if (activeSession.messages && activeSession.messages.length > 0) {
+            const fresh = createSession();
+            STATE.sessions.push(fresh);
+            STATE.currentSessionId = fresh.id;
+            persistToStorage();
+        } else {
+            STATE.currentSessionId = activeSession.id;
+        }
     } else {
         const session = createSession();
         STATE.sessions.push(session);
@@ -152,7 +161,7 @@ function loadSettings() {
 // Unified API Request (OpenAI-compatible)
 // ============================================
 
-async function sendChatRequest(model, messages, stream = false) {
+async function sendChatRequest(model, messages, stream = false, onToken = null) {
     const openaiMessages = messages.map(m => {
         if (m.image) {
             return {
@@ -186,31 +195,38 @@ async function sendChatRequest(model, messages, stream = false) {
     }
 
     if (stream) {
-        return readOpenAIStream(response);
+        return readOpenAIStream(response, onToken);
     }
 
     const data = await response.json();
     return data.choices[0].message.content;
 }
 
-async function readOpenAIStream(response) {
+async function readOpenAIStream(response, onToken = null) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let result = '';
+    let buffer = '';
 
     while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value);
-        for (const line of chunk.split('\n')) {
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep last incomplete line
+
+        for (const line of lines) {
             if (!line.startsWith('data: ')) continue;
-            const data = line.slice(6).trim();
-            if (data === '[DONE]') return result;
+            const payload = line.slice(6).trim();
+            if (payload === '[DONE]') return result;
             try {
-                const parsed = JSON.parse(data);
+                const parsed = JSON.parse(payload);
                 const delta = parsed.choices?.[0]?.delta?.content;
-                if (delta) result += delta;
+                if (delta != null && delta !== '') {
+                    result += delta;
+                    if (onToken) onToken(delta);
+                }
             } catch {}
         }
     }
@@ -276,27 +292,55 @@ async function sendMessage() {
 
     // Fire both requests in parallel
     const messagesToSend = [...session.messages];
-    const [biolvlmResult, gptResult] = await Promise.allSettled([
-        sendChatRequest(CONFIG.biovlmModel, messagesToSend, CONFIG.streamMode),
-        sendChatRequest(CONFIG.gptModel, messagesToSend, false)
-    ]);
 
-    // Replace loading bubble with response — Baseline (GPT/OpenAI, left panel)
-    baselineLoading.remove();
-    if (gptResult.status === 'fulfilled') {
-        appendAssistantBubble(elements.baselineChat, gptResult.value);
-    } else {
-        appendAssistantBubble(elements.baselineChat, null, gptResult.reason.message);
-    }
+    if (CONFIG.streamMode) {
+        // ── Streaming path ────────────────────────────────────────────
+        baselineLoading.remove();
+        usLoading.remove();
 
-    // Replace loading bubble with response — BioVLM (right panel)
-    usLoading.remove();
-    if (biolvlmResult.status === 'fulfilled') {
-        const response = biolvlmResult.value;
-        appendAssistantBubble(elements.usChat, response);
-        session.messages.push({ role: 'assistant', content: response });
+        const baselineBubble = createStreamingBubble(elements.baselineChat);
+        const usBubble       = createStreamingBubble(elements.usChat);
+
+        const [biolvlmResult, gptResult] = await Promise.allSettled([
+            sendChatRequest(CONFIG.biovlmModel, messagesToSend, true, d => usBubble.update(d)),
+            sendChatRequest(CONFIG.gptModel,    messagesToSend, true, d => baselineBubble.update(d))
+        ]);
+
+        if (biolvlmResult.status === 'fulfilled') {
+            usBubble.finalize(biolvlmResult.value);
+            session.messages.push({ role: 'assistant', content: biolvlmResult.value });
+        } else {
+            usBubble.error(biolvlmResult.reason ? biolvlmResult.reason.message : 'Error');
+        }
+
+        if (gptResult.status === 'fulfilled') {
+            baselineBubble.finalize(gptResult.value);
+        } else {
+            baselineBubble.error(gptResult.reason ? gptResult.reason.message : 'Error');
+        }
+
     } else {
-        appendAssistantBubble(elements.usChat, null, biolvlmResult.reason.message);
+        // ── Non-streaming path (original) ────────────────────────────
+        const [biolvlmResult, gptResult] = await Promise.allSettled([
+            sendChatRequest(CONFIG.biovlmModel, messagesToSend, false),
+            sendChatRequest(CONFIG.gptModel,    messagesToSend, false)
+        ]);
+
+        baselineLoading.remove();
+        if (gptResult.status === 'fulfilled') {
+            appendAssistantBubble(elements.baselineChat, gptResult.value);
+        } else {
+            appendAssistantBubble(elements.baselineChat, null, gptResult.reason.message);
+        }
+
+        usLoading.remove();
+        if (biolvlmResult.status === 'fulfilled') {
+            const resp = biolvlmResult.value;
+            appendAssistantBubble(elements.usChat, resp);
+            session.messages.push({ role: 'assistant', content: resp });
+        } else {
+            appendAssistantBubble(elements.usChat, null, biolvlmResult.reason.message);
+        }
     }
 
     // Save panel state
@@ -359,6 +403,46 @@ function appendLoadingBubble(chatEl) {
     chatEl.appendChild(bubble);
     chatEl.scrollTop = chatEl.scrollHeight;
     return bubble;
+}
+/** Create a bubble that transitions: typing dots → live tokens → formatted markdown */
+function createStreamingBubble(chatEl) {
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble bubble-assistant';
+    bubble.innerHTML =
+        '<div class="typing-indicator">' +
+        '<span class="typing-dot"></span>' +
+        '<span class="typing-dot"></span>' +
+        '<span class="typing-dot"></span></div>';
+    chatEl.appendChild(bubble);
+    chatEl.scrollTop = chatEl.scrollHeight;
+
+    let started = false;
+    let textEl = null;
+
+    return {
+        bubble,
+        update(delta) {
+            if (!started) {
+                started = true;
+                bubble.innerHTML =
+                    '<span class="stream-text"></span><span class="stream-cursor"></span>';
+                textEl = bubble.querySelector('.stream-text');
+            }
+            if (textEl && delta) {
+                textEl.textContent += delta;
+                chatEl.scrollTop = chatEl.scrollHeight;
+            }
+        },
+        finalize(fullText) {
+            bubble.innerHTML = fullText
+                ? formatMessageContent(fullText)
+                : '<p></p>';
+            chatEl.scrollTop = chatEl.scrollHeight;
+        },
+        error(msg) {
+            bubble.innerHTML = '<p class="error-text">' + escapeHtml(msg) + '</p>';
+        }
+    };
 }
 
 function escapeHtml(str) {
@@ -611,7 +695,7 @@ function handleImageSelect(e) {
 
 function handleDragEnter(e) {
     e.preventDefault();
-    elements.inputBar.classList.add('drag-over');
+    elements.inputBar.classList.add('drag-over', 'drag-expand');
 }
 
 function handleDragOver(e) {
@@ -621,13 +705,13 @@ function handleDragOver(e) {
 function handleDragLeave(e) {
     // Only remove if we actually left the input bar
     if (!elements.inputBar.contains(e.relatedTarget)) {
-        elements.inputBar.classList.remove('drag-over');
+        elements.inputBar.classList.remove('drag-over', 'drag-expand');
     }
 }
 
 function handleDrop(e) {
     e.preventDefault();
-    elements.inputBar.classList.remove('drag-over');
+    elements.inputBar.classList.remove('drag-over', 'drag-expand');
     const file = e.dataTransfer.files[0];
     if (file && file.type.startsWith('image/')) {
         processImageFile(file);
@@ -651,7 +735,7 @@ function processImageFile(file) {
     reader.onload = (e) => {
         STATE.currentImage = e.target.result;
         elements.imagePreview.src = e.target.result;
-        elements.inputPreviewRow.style.display = 'block';
+        elements.inputPreviewRow.classList.add('visible');
         updateSendButton();
         showToast('Image added', 'success');
     };
@@ -660,7 +744,7 @@ function processImageFile(file) {
 
 function removeImage() {
     STATE.currentImage = null;
-    if (elements.inputPreviewRow) elements.inputPreviewRow.style.display = 'none';
+    if (elements.inputPreviewRow) elements.inputPreviewRow.classList.remove('visible');
     if (elements.imagePreview) elements.imagePreview.src = '';
     if (elements.imageInput) elements.imageInput.value = '';
     updateSendButton();

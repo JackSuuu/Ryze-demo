@@ -373,12 +373,26 @@ body {
     box-shadow: 0 0 0 2px rgba(91, 95, 199, 0.12);
 }
 
-/* Image preview row — sits above the text row */
+/* Image preview row — hidden by default, shown on demand */
 .input-preview-row {
+    display: none;
     padding: 12px 14px 0;
+}
+/* Row shown when image is loaded or when dragging */
+.input-preview-row.visible,
+.input-bar.drag-expand .input-preview-row {
+    display: block;
+    animation: previewSlideDown 0.2s ease;
+}
+@keyframes previewSlideDown {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
 }
 .input-preview-thumb {
     position: relative;
+    display: none;  /* shown only via .input-preview-row.visible rule below */
+}
+.input-preview-row.visible .input-preview-thumb {
     display: inline-block;
 }
 .input-preview-thumb img {
@@ -468,25 +482,51 @@ body {
 .send-btn:hover:not(:disabled) { opacity: 0.8; }
 .send-btn:disabled { opacity: 0.25; cursor: not-allowed; }
 
-/* Drop overlay */
-.drop-overlay {
+/* Drop overlay — hidden, replaced by in-row expansion */
+.drop-overlay { display: none !important; }
+
+/* ── Drag-expand: input bar grows when user drags an image over it ── */
+.input-bar.drag-expand .input-preview-row {
+    max-height: 160px;
+    padding: 12px 14px 0;
+}
+
+/* Highlight border while dragging */
+.input-bar.drag-expand .input-bar-inner {
+    border-color: var(--accent-baseline);
+    box-shadow: 0 0 0 2px rgba(91, 95, 199, 0.15);
+}
+
+/* Drag drop placeholder — shown inside the preview row while dragging (no image yet) */
+.drag-drop-placeholder {
     display: none;
-    position: absolute;
-    inset: 0;
-    border-radius: 16px;
-    background: rgba(91, 95, 199, 0.06);
+    width: 180px;
+    height: 108px;
     border: 2px dashed var(--accent-baseline);
+    border-radius: 10px;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
+    gap: 6px;
     color: var(--accent-baseline);
-    font-size: 14px;
+    font-size: 12px;
     font-weight: 500;
+    background: rgba(91, 95, 199, 0.04);
+    animation: placeholder-pulse 1.4s ease-in-out infinite;
     pointer-events: none;
-    z-index: 2;
+    user-select: none;
 }
-.drop-overlay i { font-size: 18px; }
-.input-bar.drag-over .drop-overlay { display: flex; }
+.drag-drop-placeholder i { font-size: 22px; }
+
+/* Show placeholder only when dragging AND no image loaded */
+.input-bar.drag-expand .input-preview-row:not(.visible) .drag-drop-placeholder {
+    display: flex;
+}
+
+@keyframes placeholder-pulse {
+    0%, 100% { background: rgba(91, 95, 199, 0.04); border-color: var(--accent-baseline); }
+    50%       { background: rgba(91, 95, 199, 0.11); border-color: #8588e0; }
+}
 
 /* ============================================
    Modal (Settings)
@@ -613,4 +653,32 @@ input:checked + .slider-toggle:before { transform: translateX(20px); }
 
     .panel-header { padding: 0 12px; }
     .input-bar { padding: 0 12px 12px; }
+}
+
+/* ============================================
+   Streaming
+   ============================================ */
+
+/* Blinking cursor at end of streaming text */
+.stream-cursor {
+    display: inline-block;
+    width: 2px;
+    height: 0.9em;
+    background: var(--text-primary);
+    margin-left: 1px;
+    vertical-align: text-bottom;
+    border-radius: 1px;
+    animation: blink 0.75s step-end infinite;
+}
+@keyframes blink {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0; }
+}
+
+/* Streaming text preserves whitespace/newlines */
+.stream-text {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-size: inherit;
+    line-height: inherit;
 }

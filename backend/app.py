@@ -24,6 +24,10 @@ OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 ALLOWED_MODELS = {"openai/gpt-5-mini", "local/biolvlm-8b-grpo"}
 
+# Ollama configuration
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "biovlm:latest")
+
 # ServerlessLLM imports
 SLLM_AVAILABLE = False
 try:
@@ -472,6 +476,41 @@ async def forward_to_openai(provider: str, model_name: str, request: ChatComplet
     return result
 
 
+async def forward_to_ollama(request: ChatCompletionRequest):
+    """Forward request to local Ollama instance."""
+    import openai
+    client = openai.AsyncOpenAI(base_url=f"{OLLAMA_BASE_URL}/v1", api_key="ollama")
+
+    # Convert messages to dicts
+    ollama_messages = []
+    for msg in request.messages:
+        if isinstance(msg.content, str):
+            ollama_messages.append({"role": msg.role, "content": msg.content})
+        else:
+            content_parts = []
+            for part in msg.content:
+                if isinstance(part, dict):
+                    content_parts.append(part)
+                else:
+                    content_parts.append(part.model_dump())
+            ollama_messages.append({"role": msg.role, "content": content_parts})
+
+    if request.stream:
+        response = await client.chat.completions.create(
+            model=OLLAMA_MODEL, messages=ollama_messages,
+            max_tokens=request.max_tokens, temperature=request.temperature, stream=True
+        )
+        return StreamingResponse(openai_stream_proxy(response, request.model), media_type="text/event-stream")
+
+    response = await client.chat.completions.create(
+        model=OLLAMA_MODEL, messages=ollama_messages,
+        max_tokens=request.max_tokens, temperature=request.temperature
+    )
+    result = response.model_dump()
+    result["model"] = request.model
+    return result
+
+
 # ============================================
 # Endpoints
 # ============================================
@@ -530,27 +569,7 @@ async def chat_completions(request: ChatCompletionRequest):
         return await forward_to_openai(provider, model_name, request)
 
     if provider == "local":
-        qwen_messages, pil_images = parse_openai_messages(request.messages)
-
-        if request.stream:
-            return StreamingResponse(
-                generate_openai_stream(
-                    request.model,
-                    qwen_messages,
-                    pil_images,
-                    request.max_tokens or 2048,
-                    request.temperature or 0.7
-                ),
-                media_type="text/event-stream"
-            )
-
-        response_text = await generate_response_from_parsed(
-            qwen_messages,
-            pil_images,
-            request.max_tokens or 2048,
-            request.temperature or 0.7
-        )
-        return build_chat_completion(request.model, response_text)
+        return await forward_to_ollama(request)
 
     raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}. Use local/* for BioVLM or openai/* for GPT.")
 
