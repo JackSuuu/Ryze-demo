@@ -69,11 +69,20 @@ body {
 }
 
 .sidebar-brand {
-    font-family: var(--font-serif);
-    font-size: 24px;
-    color: var(--text-primary);
     padding: 4px 8px 8px;
+    display: flex;
+    align-items: center;
+}
+.sidebar-logo {
+    height: 36px;
+    width: auto;
+    object-fit: contain;
+}
+.sidebar-brand-name {
+    font-family: var(--font-serif);
+    font-size: 22px;
     font-style: italic;
+    color: var(--text-primary);
 }
 
 .new-chat-btn {
