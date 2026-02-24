@@ -3,10 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BioVLM</title>
+    <title>Ryze — BioVLM vs GPT</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&family=Instrument+Serif&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="css/style.css">
 </head>
@@ -14,40 +14,44 @@
     <div class="app-container">
         <!-- Sidebar -->
         <aside class="sidebar" id="sidebar">
+            <div class="sidebar-brand">Ryze</div>
             <button class="new-chat-btn" id="newChatBtn" title="New Chat">
                 <i class="fas fa-plus"></i> New Chat
             </button>
+            <div class="sidebar-divider"></div>
             <div class="chat-history" id="chatHistory">
             </div>
+            <button class="sidebar-nav-item" id="settingsBtn" title="Settings">
+                <i class="fas fa-gear"></i> Settings
+            </button>
         </aside>
 
         <!-- Main Area -->
         <main class="main-area">
-            <!-- Header with panel labels -->
+            <!-- Header -->
             <header class="panel-header">
-                <div class="header-label label-baseline" id="baselineLabel">Baseline</div>
-                <div class="header-label label-us">BioVLM</div>
-                <button class="settings-btn" id="settingsBtn" title="Settings">
-                    <i class="fas fa-gear"></i>
-                </button>
-            </header>
-
-            <!-- Comparison Panels -->
-            <div class="comparison-area" id="comparisonArea">
-                <div class="panel" id="panelBaseline">
-                    <div class="panel-chat" id="baselineChat">
-                        <div class="panel-empty">
-                            <i class="fas fa-robot"></i>
-                            <span>OpenAI responses appear here</span>
-                        </div>
+                <div class="header-mode">
+                    <i class="fas fa-columns"></i>
+                    <span>Side by Side</span>
+                </div>
+                <div class="header-models">
+                    <div class="model-badge baseline">
+                        <i class="fas fa-robot"></i>
+                        <span id="baselineLabel">GPT 5 Mini</span>
+                    </div>
+                    <div class="model-badge biovlm">
+                        <i class="fas fa-dna"></i>
+                        <span>BioVLM</span>
                     </div>
                 </div>
-                <div class="panel" id="panelUs">
-                    <div class="panel-chat" id="usChat">
-                        <div class="panel-empty">
-                            <i class="fas fa-dna"></i>
-                            <span>BioVLM responses appear here</span>
-                        </div>
+            </header>
+
+            <!-- Chat Area -->
+            <div class="chat-area">
+                <div class="chat-scroll" id="chatScroll">
+                    <div class="empty-state" id="emptyState">
+                        <h1>What would you like to compare?</h1>
+                        <p>Send a message to see GPT and BioVLM respond side by side.</p>
                     </div>
                 </div>
             </div>
@@ -55,9 +59,8 @@
             <!-- Input Bar -->
             <div class="input-bar" id="inputBar">
                 <div class="input-bar-inner" id="inputBarInner">
-                    <!-- Image preview row (above text) -->
+                    <!-- Image preview row -->
                     <div class="input-preview-row" id="inputPreviewRow">
-                        <!-- Drop placeholder: visible while dragging, hidden when image loaded -->
                         <div class="drag-drop-placeholder" id="dragDropPlaceholder">
                             <i class="fas fa-cloud-upload-alt"></i>
                             <span>Drop image here</span>
@@ -67,23 +70,28 @@
                             <button class="remove-preview-btn" id="removeImageBtn"><i class="fas fa-times"></i></button>
                         </div>
                     </div>
-                    <!-- Text + buttons row -->
+                    <!-- Text row -->
                     <div class="input-text-row">
-                        <button class="upload-btn" id="uploadBtn" title="Upload image">
-                            <i class="fas fa-image"></i>
-                        </button>
                         <input
                             type="text"
                             id="messageInput"
-                            placeholder="User Input (Support user upload image)"
+                            placeholder="Ask anything..."
                             autocomplete="off"
                         >
                         <input type="file" id="imageInput" accept="image/*" style="display:none;">
+                    </div>
+                    <!-- Toolbar row -->
+                    <div class="input-toolbar">
+                        <button class="upload-btn" id="uploadBtn" title="Upload image">
+                            <i class="fas fa-image"></i>
+                        </button>
+                        <div class="toolbar-spacer"></div>
                         <button class="send-btn" id="sendBtn" disabled>
-                            <i class="fas fa-arrow-right"></i>
+                            <i class="fas fa-arrow-up"></i>
                         </button>
                     </div>
                 </div>
+                <div class="input-disclaimer">Responses may be inaccurate. Verify important information.</div>
                 <div class="drop-overlay" id="dropOverlay">
                     <i class="fas fa-cloud-upload-alt"></i>
                     <span>Drop image here</span>
@@ -103,10 +111,6 @@
             </div>
             <div class="modal-body">
                 <div class="setting-group">
-                    <label>API Endpoint</label>
-                    <input type="text" id="apiEndpoint" value="http://localhost:8000">
-                </div>
-                <div class="setting-group">
                     <label>Temperature</label>
                     <div class="slider-container">
                         <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7">
@@ -123,6 +127,24 @@
                         <input type="checkbox" id="streamMode" checked>
                         <span class="slider-toggle"></span>
                     </label>
+                </div>
+                <div class="settings-divider"></div>
+                <div class="setting-section-label">OpenAI BYOK (optional)</div>
+                <div class="setting-group">
+                    <label>Base URL</label>
+                    <input type="text" id="byokBaseUrl" placeholder="https://api.openai.com">
+                </div>
+                <div class="setting-group">
+                    <label>API Key</label>
+                    <input type="password" id="byokApiKey" placeholder="sk-...">
+                </div>
+                <div class="setting-group">
+                    <label>Model Name</label>
+                    <input type="text" id="byokModelName" placeholder="gpt-4o-mini">
+                </div>
+                <div class="setting-group">
+                    <label>Display Name</label>
+                    <input type="text" id="byokDisplayName" placeholder="GPT 5 Mini">
                 </div>
             </div>
             <div class="modal-footer">

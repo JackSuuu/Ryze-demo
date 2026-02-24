@@ -1,5 +1,5 @@
 /**
- * BioVLM — Comparison Dashboard
+ * Ryze — Arena AI Side-by-Side Dashboard
  */
 
 // ============================================
@@ -7,16 +7,20 @@
 // ============================================
 
 const CONFIG = {
-    apiEndpoint: localStorage.getItem('apiEndpoint') || '/api',
+    apiEndpoint: '/api',
     temperature: parseFloat(localStorage.getItem('temperature')) || 0.7,
     maxTokens: parseInt(localStorage.getItem('maxTokens')) || 2048,
     streamMode: localStorage.getItem('streamMode') !== 'false', // default on
     biovlmModel: 'local/biolvlm-8b-grpo',
-    gptModel: 'openai/gpt-5-mini'
+    gptModel: 'openai/gpt-5-mini',
+    byokBaseUrl: localStorage.getItem('byokBaseUrl') || '',
+    byokApiKey: localStorage.getItem('byokApiKey') || '',
+    byokModelName: localStorage.getItem('byokModelName') || '',
+    byokDisplayName: localStorage.getItem('byokDisplayName') || '',
 };
 
 const STATE = {
-    sessions: [],        // Array of { id, title, messages, baselineHtml, usHtml }
+    sessions: [],        // Array of { id, title, messages, chatHtml }
     currentSessionId: null,
     currentImage: null,
     isLoading: false
@@ -32,16 +36,13 @@ const STORAGE_ACTIVE_KEY = 'biovlm_activeSession';
     const loaded = loadFromStorage();
     if (loaded && loaded.length > 0) {
         STATE.sessions = loaded;
-        // Derive counter from existing IDs to avoid collisions
         _sessionCounter = loaded.reduce((max, s) => {
             const match = s.id.match(/_(\d+)$/);
             return match ? Math.max(max, parseInt(match[1])) : max;
         }, 0);
-        // Restore last active session, or fallback to most recent
         const savedActiveId = localStorage.getItem(STORAGE_ACTIVE_KEY);
         const activeSession = loaded.find(s => s.id === savedActiveId) || loaded[loaded.length - 1];
 
-        // Page load: if the session has content, auto-create a blank one
         if (activeSession.messages && activeSession.messages.length > 0) {
             const fresh = createSession();
             STATE.sessions.push(fresh);
@@ -68,12 +69,9 @@ const elements = {
     newChatBtn: document.getElementById('newChatBtn'),
     chatHistory: document.getElementById('chatHistory'),
 
-    // Panels
-    comparisonArea: document.getElementById('comparisonArea'),
-    panelBaseline: document.getElementById('panelBaseline'),
-    panelUs: document.getElementById('panelUs'),
-    baselineChat: document.getElementById('baselineChat'),
-    usChat: document.getElementById('usChat'),
+    // Chat area
+    chatScroll: document.getElementById('chatScroll'),
+    emptyState: document.getElementById('emptyState'),
 
     // Input
     inputBar: document.getElementById('inputBar'),
@@ -96,11 +94,16 @@ const elements = {
     toastContainer: document.getElementById('toastContainer'),
 
     // Settings inputs
-    apiEndpointInput: document.getElementById('apiEndpoint'),
     temperatureInput: document.getElementById('temperature'),
     tempValue: document.getElementById('tempValue'),
     maxTokensInput: document.getElementById('maxTokens'),
     streamModeInput: document.getElementById('streamMode'),
+
+    // BYOK inputs
+    byokBaseUrlInput: document.getElementById('byokBaseUrl'),
+    byokApiKeyInput: document.getElementById('byokApiKey'),
+    byokModelNameInput: document.getElementById('byokModelName'),
+    byokDisplayNameInput: document.getElementById('byokDisplayName'),
 };
 
 // ============================================
@@ -113,7 +116,6 @@ document.addEventListener('DOMContentLoaded', () => {
     updateBaselineLabel();
     renderSidebar();
 
-    // Restore the active session's panel HTML
     const active = getCurrentSession();
     if (active) restoreSession(active);
 });
@@ -147,14 +149,22 @@ function initEventListeners() {
     elements.settingsModal?.addEventListener('click', (e) => {
         if (e.target === elements.settingsModal) closeSettings();
     });
+
+    // Copy button delegation on chat scroll
+    elements.chatScroll?.addEventListener('click', handleCopyClick);
 }
 
 function loadSettings() {
-    elements.apiEndpointInput.value = CONFIG.apiEndpoint;
     elements.temperatureInput.value = CONFIG.temperature;
     elements.tempValue.textContent = CONFIG.temperature;
     elements.maxTokensInput.value = CONFIG.maxTokens;
     elements.streamModeInput.checked = CONFIG.streamMode;
+
+    // BYOK
+    elements.byokBaseUrlInput.value = CONFIG.byokBaseUrl;
+    elements.byokApiKeyInput.value = CONFIG.byokApiKey;
+    elements.byokModelNameInput.value = CONFIG.byokModelName;
+    elements.byokDisplayNameInput.value = CONFIG.byokDisplayName;
 }
 
 // ============================================
@@ -214,7 +224,7 @@ async function readOpenAIStream(response, onToken = null) {
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
-        buffer = lines.pop(); // keep last incomplete line
+        buffer = lines.pop();
 
         for (const line of lines) {
             if (!line.startsWith('data: ')) continue;
@@ -234,7 +244,62 @@ async function readOpenAIStream(response, onToken = null) {
 }
 
 // ============================================
-// Send Message (Panel-based)
+// BYOK: Direct OpenAI Call
+// ============================================
+
+function isByokEnabled() {
+    return !!CONFIG.byokApiKey;
+}
+
+async function sendDirectOpenAIRequest(messages, stream = false, onToken = null) {
+    const baseUrl = (CONFIG.byokBaseUrl || 'https://api.openai.com').replace(/\/+$/, '');
+    const model = CONFIG.byokModelName || 'gpt-4o-mini';
+
+    const openaiMessages = messages.map(m => {
+        if (m.image) {
+            return {
+                role: m.role,
+                content: [
+                    { type: "text", text: m.content || "" },
+                    { type: "image_url", image_url: { url: m.image } }
+                ]
+            };
+        }
+        return { role: m.role, content: m.content };
+    });
+
+    const body = {
+        model: model,
+        messages: openaiMessages,
+        max_tokens: CONFIG.maxTokens,
+        temperature: CONFIG.temperature,
+        stream: stream
+    };
+
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${CONFIG.byokApiKey}`
+        },
+        body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error?.message || errData.detail || `HTTP ${response.status}`);
+    }
+
+    if (stream) {
+        return readOpenAIStream(response, onToken);
+    }
+
+    const data = await response.json();
+    return data.choices[0].message.content;
+}
+
+// ============================================
+// Send Message (Arena-style)
 // ============================================
 
 function updateSendButton() {
@@ -270,16 +335,42 @@ async function sendMessage() {
         updateSidebarTitle(session.id, title);
     }
 
-    // Clear empty placeholders on first message
-    clearEmptyPlaceholders();
+    // Hide empty state
+    hideEmptyState();
 
-    // Add user bubble to both panels (with image if present)
-    appendUserBubble(elements.baselineChat, content, STATE.currentImage);
-    appendUserBubble(elements.usChat, content, STATE.currentImage);
+    // Build message group
+    const group = document.createElement('div');
+    group.className = 'message-group';
 
-    // Add typing indicator bubbles
-    const baselineLoading = appendLoadingBubble(elements.baselineChat);
-    const usLoading = appendLoadingBubble(elements.usChat);
+    // User bubble (once, right-aligned)
+    const userDiv = document.createElement('div');
+    userDiv.className = 'user-message';
+    const bubble = document.createElement('div');
+    bubble.className = 'user-bubble';
+    let html = '';
+    if (STATE.currentImage) {
+        html += `<img class="bubble-image" src="${STATE.currentImage}" alt="Uploaded image">`;
+    }
+    if (content) {
+        html += `<p>${escapeHtml(content)}</p>`;
+    }
+    bubble.innerHTML = html;
+    userDiv.appendChild(bubble);
+    group.appendChild(userDiv);
+
+    // Response pair (two cards side by side)
+    const pair = document.createElement('div');
+    pair.className = 'response-pair';
+
+    const gptCard = createResponseCard('fa-robot', CONFIG.byokDisplayName || 'GPT 5 Mini');
+    const bioCard = createResponseCard('fa-dna', 'BioVLM');
+
+    pair.appendChild(gptCard.card);
+    pair.appendChild(bioCard.card);
+    group.appendChild(pair);
+
+    elements.chatScroll.appendChild(group);
+    scrollToBottom();
 
     // Clear input
     elements.messageInput.value = '';
@@ -294,56 +385,61 @@ async function sendMessage() {
     const messagesToSend = [...session.messages];
 
     if (CONFIG.streamMode) {
-        // ── Streaming path ────────────────────────────────────────────
-        baselineLoading.remove();
-        usLoading.remove();
+        // Streaming path
+        const gptStream = createStreamingContent(gptCard.contentEl);
+        const bioStream = createStreamingContent(bioCard.contentEl);
 
-        const baselineBubble = createStreamingBubble(elements.baselineChat);
-        const usBubble       = createStreamingBubble(elements.usChat);
+        const gptStreamCall = isByokEnabled()
+            ? sendDirectOpenAIRequest(messagesToSend, true, d => { gptStream.update(d); scrollToBottom(); })
+            : sendChatRequest(CONFIG.gptModel, messagesToSend, true, d => { gptStream.update(d); scrollToBottom(); });
 
         const [biolvlmResult, gptResult] = await Promise.allSettled([
-            sendChatRequest(CONFIG.biovlmModel, messagesToSend, true, d => usBubble.update(d)),
-            sendChatRequest(CONFIG.gptModel,    messagesToSend, true, d => baselineBubble.update(d))
+            sendChatRequest(CONFIG.biovlmModel, messagesToSend, true, d => { bioStream.update(d); scrollToBottom(); }),
+            gptStreamCall
         ]);
 
         if (biolvlmResult.status === 'fulfilled') {
-            usBubble.finalize(biolvlmResult.value);
+            bioStream.finalize(biolvlmResult.value);
             session.messages.push({ role: 'assistant', content: biolvlmResult.value });
         } else {
-            usBubble.error(biolvlmResult.reason ? biolvlmResult.reason.message : 'Error');
+            bioStream.error(biolvlmResult.reason ? biolvlmResult.reason.message : 'Error');
         }
 
         if (gptResult.status === 'fulfilled') {
-            baselineBubble.finalize(gptResult.value);
+            gptStream.finalize(gptResult.value);
         } else {
-            baselineBubble.error(gptResult.reason ? gptResult.reason.message : 'Error');
+            gptStream.error(gptResult.reason ? gptResult.reason.message : 'Error');
         }
 
     } else {
-        // ── Non-streaming path (original) ────────────────────────────
+        // Non-streaming path: show typing indicators then replace
+        gptCard.contentEl.innerHTML = typingIndicatorHTML();
+        bioCard.contentEl.innerHTML = typingIndicatorHTML();
+
+        const gptNonStreamCall = isByokEnabled()
+            ? sendDirectOpenAIRequest(messagesToSend, false)
+            : sendChatRequest(CONFIG.gptModel, messagesToSend, false);
+
         const [biolvlmResult, gptResult] = await Promise.allSettled([
             sendChatRequest(CONFIG.biovlmModel, messagesToSend, false),
-            sendChatRequest(CONFIG.gptModel,    messagesToSend, false)
+            gptNonStreamCall
         ]);
 
-        baselineLoading.remove();
         if (gptResult.status === 'fulfilled') {
-            appendAssistantBubble(elements.baselineChat, gptResult.value);
+            gptCard.contentEl.innerHTML = formatMessageContent(gptResult.value);
         } else {
-            appendAssistantBubble(elements.baselineChat, null, gptResult.reason.message);
+            gptCard.contentEl.innerHTML = `<p class="error-text">${escapeHtml(gptResult.reason?.message || 'Error')}</p>`;
         }
 
-        usLoading.remove();
         if (biolvlmResult.status === 'fulfilled') {
-            const resp = biolvlmResult.value;
-            appendAssistantBubble(elements.usChat, resp);
-            session.messages.push({ role: 'assistant', content: resp });
+            bioCard.contentEl.innerHTML = formatMessageContent(biolvlmResult.value);
+            session.messages.push({ role: 'assistant', content: biolvlmResult.value });
         } else {
-            appendAssistantBubble(elements.usChat, null, biolvlmResult.reason.message);
+            bioCard.contentEl.innerHTML = `<p class="error-text">${escapeHtml(biolvlmResult.reason?.message || 'Error')}</p>`;
         }
     }
 
-    // Save panel state
+    scrollToBottom();
     saveCurrentSession();
 
     STATE.isLoading = false;
@@ -351,98 +447,106 @@ async function sendMessage() {
 }
 
 // ============================================
-// Bubble Helpers
+// Response Card & Streaming Helpers
 // ============================================
 
-function clearEmptyPlaceholders() {
-    elements.baselineChat.querySelector('.panel-empty')?.remove();
-    elements.usChat.querySelector('.panel-empty')?.remove();
+function createResponseCard(icon, name) {
+    const card = document.createElement('div');
+    card.className = 'response-card';
+
+    const header = document.createElement('div');
+    header.className = 'response-card-header';
+
+    const model = document.createElement('div');
+    model.className = 'response-card-model';
+    model.innerHTML = `<i class="fas ${icon}"></i><span>${escapeHtml(name)}</span>`;
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'copy-btn';
+    copyBtn.title = 'Copy';
+    copyBtn.innerHTML = '<i class="fas fa-copy"></i>';
+
+    header.appendChild(model);
+    header.appendChild(copyBtn);
+
+    const contentEl = document.createElement('div');
+    contentEl.className = 'response-card-content';
+    contentEl.innerHTML = typingIndicatorHTML();
+
+    card.appendChild(header);
+    card.appendChild(contentEl);
+
+    return { card, contentEl };
 }
 
-function appendUserBubble(chatEl, text, imageSrc) {
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble bubble-user';
-
-    let html = '';
-    if (imageSrc) {
-        html += `<img class="bubble-image" src="${imageSrc}" alt="Uploaded image">`;
-    }
-    if (text) {
-        html += `<p>${escapeHtml(text)}</p>`;
-    }
-    bubble.innerHTML = html;
-    chatEl.appendChild(bubble);
-    chatEl.scrollTop = chatEl.scrollHeight;
-}
-
-function appendAssistantBubble(chatEl, content, errorMsg) {
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble bubble-assistant';
-
-    if (errorMsg) {
-        bubble.innerHTML = `<p class="error-text">${escapeHtml(errorMsg)}</p>`;
-    } else {
-        bubble.innerHTML = formatMessageContent(content);
-    }
-
-    chatEl.appendChild(bubble);
-    chatEl.scrollTop = chatEl.scrollHeight;
-    return bubble;
-}
-
-function appendLoadingBubble(chatEl) {
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble bubble-assistant';
-    bubble.innerHTML = `
-        <div class="typing-indicator">
-            <span class="typing-dot"></span>
-            <span class="typing-dot"></span>
-            <span class="typing-dot"></span>
-        </div>
-    `;
-    chatEl.appendChild(bubble);
-    chatEl.scrollTop = chatEl.scrollHeight;
-    return bubble;
-}
-/** Create a bubble that transitions: typing dots → live tokens → formatted markdown */
-function createStreamingBubble(chatEl) {
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble bubble-assistant';
-    bubble.innerHTML =
-        '<div class="typing-indicator">' +
-        '<span class="typing-dot"></span>' +
-        '<span class="typing-dot"></span>' +
-        '<span class="typing-dot"></span></div>';
-    chatEl.appendChild(bubble);
-    chatEl.scrollTop = chatEl.scrollHeight;
-
+function createStreamingContent(contentEl) {
     let started = false;
     let textEl = null;
 
     return {
-        bubble,
         update(delta) {
             if (!started) {
                 started = true;
-                bubble.innerHTML =
+                contentEl.innerHTML =
                     '<span class="stream-text"></span><span class="stream-cursor"></span>';
-                textEl = bubble.querySelector('.stream-text');
+                textEl = contentEl.querySelector('.stream-text');
             }
             if (textEl && delta) {
                 textEl.textContent += delta;
-                chatEl.scrollTop = chatEl.scrollHeight;
             }
         },
         finalize(fullText) {
-            bubble.innerHTML = fullText
+            contentEl.innerHTML = fullText
                 ? formatMessageContent(fullText)
                 : '<p></p>';
-            chatEl.scrollTop = chatEl.scrollHeight;
         },
         error(msg) {
-            bubble.innerHTML = '<p class="error-text">' + escapeHtml(msg) + '</p>';
+            contentEl.innerHTML = '<p class="error-text">' + escapeHtml(msg) + '</p>';
         }
     };
+}
+
+function typingIndicatorHTML() {
+    return '<div class="typing-indicator">' +
+        '<span class="typing-dot"></span>' +
+        '<span class="typing-dot"></span>' +
+        '<span class="typing-dot"></span></div>';
+}
+
+function hideEmptyState() {
+    if (elements.emptyState) {
+        elements.emptyState.style.display = 'none';
+    }
+}
+
+function showEmptyState() {
+    if (elements.emptyState) {
+        elements.emptyState.style.display = '';
+    }
+}
+
+function scrollToBottom() {
+    if (elements.chatScroll) {
+        elements.chatScroll.scrollTop = elements.chatScroll.scrollHeight;
+    }
+}
+
+// Copy button delegation
+function handleCopyClick(e) {
+    const btn = e.target.closest('.copy-btn');
+    if (!btn) return;
+    const card = btn.closest('.response-card');
+    if (!card) return;
+    const contentEl = card.querySelector('.response-card-content');
+    if (!contentEl) return;
+
+    const text = contentEl.innerText || contentEl.textContent;
+    navigator.clipboard.writeText(text).then(() => {
+        btn.innerHTML = '<i class="fas fa-check"></i>';
+        setTimeout(() => { btn.innerHTML = '<i class="fas fa-copy"></i>'; }, 1500);
+    }).catch(() => {
+        showToast('Failed to copy', 'error');
+    });
 }
 
 function escapeHtml(str) {
@@ -451,9 +555,17 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
-function resetPanels() {
-    elements.baselineChat.innerHTML = '<div class="panel-empty"><i class="fas fa-robot"></i><span>OpenAI responses appear here</span></div>';
-    elements.usChat.innerHTML = '<div class="panel-empty"><i class="fas fa-dna"></i><span>BioVLM responses appear here</span></div>';
+function resetChat() {
+    elements.chatScroll.innerHTML = '';
+    // Re-create the empty state
+    const emptyDiv = document.createElement('div');
+    emptyDiv.className = 'empty-state';
+    emptyDiv.id = 'emptyState';
+    emptyDiv.innerHTML = '<h1>What would you like to compare?</h1>' +
+        '<p>Send a message to see GPT and BioVLM respond side by side.</p>';
+    elements.chatScroll.appendChild(emptyDiv);
+    // Update reference
+    elements.emptyState = emptyDiv;
 }
 
 // ============================================
@@ -466,8 +578,7 @@ function createSession() {
         id: 'sess_' + Date.now() + '_' + _sessionCounter,
         title: 'New Chat',
         messages: [],
-        baselineHtml: null,   // saved innerHTML of baselineChat
-        usHtml: null           // saved innerHTML of usChat
+        chatHtml: null
     };
 }
 
@@ -478,8 +589,7 @@ function getCurrentSession() {
 function saveCurrentSession() {
     const session = getCurrentSession();
     if (!session) return;
-    session.baselineHtml = elements.baselineChat.innerHTML;
-    session.usHtml = elements.usChat.innerHTML;
+    session.chatHtml = elements.chatScroll.innerHTML;
     persistToStorage();
 }
 
@@ -497,7 +607,6 @@ function persistToStorage() {
             return;
         } catch (e) {
             if (e.name === 'QuotaExceededError' && STATE.sessions.length > 1) {
-                // Drop the oldest session and retry
                 const dropped = STATE.sessions.shift();
                 showToast(`Dropped oldest session "${dropped.title}" to free space`, 'warning');
                 retries--;
@@ -524,13 +633,15 @@ function loadFromStorage() {
 function restoreSession(session) {
     STATE.currentSessionId = session.id;
 
-    if (session.baselineHtml) {
-        elements.baselineChat.innerHTML = session.baselineHtml;
+    if (session.chatHtml) {
+        elements.chatScroll.innerHTML = session.chatHtml;
+        // Update emptyState ref (it may or may not exist in restored HTML)
+        elements.emptyState = elements.chatScroll.querySelector('.empty-state');
+    } else if (session.baselineHtml || session.usHtml) {
+        // Backward compat: old format sessions show empty state
+        resetChat();
     } else {
-        resetPanels();
-    }
-    if (session.usHtml) {
-        elements.usChat.innerHTML = session.usHtml;
+        resetChat();
     }
 
     highlightSidebarItem(session.id);
@@ -541,7 +652,6 @@ function restoreSession(session) {
 // ============================================
 
 function newChat() {
-    // Save current session before switching
     saveCurrentSession();
 
     const session = createSession();
@@ -552,9 +662,8 @@ function newChat() {
     removeImage();
     elements.messageInput.value = '';
     updateSendButton();
-    resetPanels();
+    resetChat();
 
-    // Add to sidebar and highlight
     addSidebarItem(session);
     highlightSidebarItem(session.id);
 
@@ -568,13 +677,11 @@ function newChat() {
 function renderSidebar() {
     elements.chatHistory.innerHTML = '';
 
-    // Add "Today" section label
     const label = document.createElement('div');
     label.className = 'history-section-label';
     label.textContent = 'Today';
     elements.chatHistory.appendChild(label);
 
-    // Render newest first
     for (let i = STATE.sessions.length - 1; i >= 0; i--) {
         appendSidebarItem(STATE.sessions[i]);
     }
@@ -582,7 +689,6 @@ function renderSidebar() {
 }
 
 function addSidebarItem(session) {
-    // Insert after the section label, before other items
     const label = elements.chatHistory.querySelector('.history-section-label');
     const item = createSidebarItem(session);
     if (label && label.nextSibling) {
@@ -639,7 +745,6 @@ function switchToSession(sessionId) {
 }
 
 function deleteSession(sessionId) {
-    // Don't delete the last session
     if (STATE.sessions.length <= 1) return;
 
     const idx = STATE.sessions.findIndex(s => s.id === sessionId);
@@ -647,14 +752,12 @@ function deleteSession(sessionId) {
 
     STATE.sessions.splice(idx, 1);
 
-    // If we deleted the active session, switch to the most recent one
     if (sessionId === STATE.currentSessionId) {
         const target = STATE.sessions[STATE.sessions.length - 1];
         STATE.currentSessionId = target.id;
         restoreSession(target);
     }
 
-    // Remove from DOM
     const item = elements.chatHistory.querySelector(`[data-session-id="${sessionId}"]`);
     if (item) item.remove();
 
@@ -703,7 +806,6 @@ function handleDragOver(e) {
 }
 
 function handleDragLeave(e) {
-    // Only remove if we actually left the input bar
     if (!elements.inputBar.contains(e.relatedTarget)) {
         elements.inputBar.classList.remove('drag-over', 'drag-expand');
     }
@@ -763,14 +865,22 @@ function closeSettings() {
 }
 
 function saveSettings() {
-    CONFIG.apiEndpoint = elements.apiEndpointInput.value;
     CONFIG.temperature = parseFloat(elements.temperatureInput.value);
     CONFIG.maxTokens = parseInt(elements.maxTokensInput.value);
     CONFIG.streamMode = elements.streamModeInput.checked;
-    localStorage.setItem('apiEndpoint', CONFIG.apiEndpoint);
     localStorage.setItem('temperature', CONFIG.temperature);
     localStorage.setItem('maxTokens', CONFIG.maxTokens);
     localStorage.setItem('streamMode', CONFIG.streamMode);
+
+    // BYOK
+    CONFIG.byokBaseUrl = elements.byokBaseUrlInput.value.trim();
+    CONFIG.byokApiKey = elements.byokApiKeyInput.value.trim();
+    CONFIG.byokModelName = elements.byokModelNameInput.value.trim();
+    CONFIG.byokDisplayName = elements.byokDisplayNameInput.value.trim();
+    localStorage.setItem('byokBaseUrl', CONFIG.byokBaseUrl);
+    localStorage.setItem('byokApiKey', CONFIG.byokApiKey);
+    localStorage.setItem('byokModelName', CONFIG.byokModelName);
+    localStorage.setItem('byokDisplayName', CONFIG.byokDisplayName);
 
     updateBaselineLabel();
     closeSettings();
@@ -783,7 +893,7 @@ function updateTempDisplay() {
 
 function updateBaselineLabel() {
     const label = document.getElementById('baselineLabel');
-    if (label) label.textContent = 'GPT 5 Mini';
+    if (label) label.textContent = CONFIG.byokDisplayName || 'GPT 5 Mini';
 }
 
 // ============================================
