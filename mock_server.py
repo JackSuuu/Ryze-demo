@@ -1,17 +1,21 @@
-"""Mock backend with OpenAI-compatible endpoints."""
+"""Dev server: serves frontend + mock API at /api/*."""
 
 import json
+import mimetypes
+import os
 import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 
 PORT = 3001
+FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 
-class MockHandler(BaseHTTPRequestHandler):
+class DevHandler(BaseHTTPRequestHandler):
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -36,32 +40,71 @@ class MockHandler(BaseHTTPRequestHandler):
                     return " ".join(text_parts), has_image
         return "", False
 
+    def _serve_file(self, file_path):
+        """Serve a static file from the frontend directory."""
+        if not file_path.is_file():
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found")
+            return
+        content_type, _ = mimetypes.guess_type(str(file_path))
+        content_type = content_type or "application/octet-stream"
+        data = file_path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _strip_api_prefix(self):
+        """Strip /api prefix from path, return stripped path or None."""
+        if self.path.startswith("/api/"):
+            return self.path[4:]  # /api/v1/... -> /v1/...
+        return None
+
     def do_GET(self):
-        if self.path == "/v1/models":
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            models = {
-                "object": "list",
-                "data": [
-                    {"id": "local/biolvlm-8b-grpo", "object": "model", "owned_by": "local"},
-                    {"id": "openai/gpt-4o-mini", "object": "model", "owned_by": "openai"},
-                ],
-            }
-            self.wfile.write(json.dumps(models).encode())
-        else:
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok"}).encode())
+        api_path = self._strip_api_prefix()
+        if api_path is not None:
+            # Mock API routes
+            if api_path == "/v1/models":
+                self.send_response(200)
+                self._cors()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                models = {
+                    "object": "list",
+                    "data": [
+                        {"id": "local/biolvlm-8b-grpo", "object": "model", "owned_by": "local"},
+                        {"id": "openai/gpt-4o-mini", "object": "model", "owned_by": "openai"},
+                    ],
+                }
+                self.wfile.write(json.dumps(models).encode())
+            else:
+                self.send_response(200)
+                self._cors()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ok"}).encode())
+            return
+
+        # Serve static frontend files
+        url_path = self.path.split("?")[0]
+        if url_path == "/":
+            url_path = "/index.html"
+        file_path = FRONTEND_DIR / url_path.lstrip("/")
+        self._serve_file(file_path)
 
     def do_POST(self):
+        api_path = self._strip_api_prefix()
+        if api_path is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length)) if length else {}
 
-        if self.path == "/v1/chat/completions":
+        if api_path == "/v1/chat/completions":
             model = body.get("model", "local/biolvlm")
             messages = body.get("messages", [])
             stream = body.get("stream", False)
@@ -139,10 +182,12 @@ class MockHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "not found"}).encode())
 
     def log_message(self, fmt, *args):
-        print(f"[mock] {args[0]}")
+        print(f"[dev] {args[0]}")
 
 
 if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", PORT), MockHandler)
-    print(f"Mock server running on http://localhost:{PORT}")
+    server = HTTPServer(("0.0.0.0", PORT), DevHandler)
+    print(f"Dev server running on http://localhost:{PORT}")
+    print(f"  Frontend: {FRONTEND_DIR}")
+    print(f"  API mock: http://localhost:{PORT}/api/v1/chat/completions")
     server.serve_forever()
