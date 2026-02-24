@@ -37,3 +37,6 @@ image.png
 
 # Local docs/plans
 docs/
+
+# Git worktrees
+.worktrees/
