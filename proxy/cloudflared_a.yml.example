@@ -1,0 +1,10 @@
+# Cloudflare Tunnel A — Server A (frontend + proxy)
+# Place this at: ~/.cloudflared/config.yml
+
+tunnel: <frontend-tunnel-id>
+credentials-file: /root/.cloudflared/<frontend-tunnel-id>.json
+
+ingress:
+  - hostname: ryze.yourdomain.com
+    service: http://localhost:8443
+  - service: http_status:404

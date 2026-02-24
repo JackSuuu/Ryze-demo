@@ -7,7 +7,7 @@
 // ============================================
 
 const CONFIG = {
-    apiEndpoint: localStorage.getItem('apiEndpoint') || 'http://localhost:8000',
+    apiEndpoint: localStorage.getItem('apiEndpoint') || '/api',
     temperature: parseFloat(localStorage.getItem('temperature')) || 0.7,
     maxTokens: parseInt(localStorage.getItem('maxTokens')) || 2048,
     streamMode: localStorage.getItem('streamMode') !== 'false', // default on
