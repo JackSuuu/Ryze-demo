@@ -1,0 +1,10 @@
+# Cloudflare Tunnel A — VPS (frontend + backend)
+# Place at: ~/.cloudflared/config.yml on VPS
+
+tunnel: <vps-tunnel-id>
+credentials-file: /root/.cloudflared/<vps-tunnel-id>.json
+
+ingress:
+  - hostname: ryze.yourdomain.com
+    service: http://127.0.0.1:80
+  - service: http_status:404

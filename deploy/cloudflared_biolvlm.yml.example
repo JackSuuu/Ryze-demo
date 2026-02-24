@@ -1,0 +1,10 @@
+# Cloudflare Tunnel B — wgjazz1 (BioVLM only)
+# Place at: ~/.cloudflared/config.yml on wgjazz1
+
+tunnel: <biolvlm-tunnel-id>
+credentials-file: /home/yanweiye/.cloudflared/<biolvlm-tunnel-id>.json
+
+ingress:
+  - hostname: biolvlm.ryze.yourdomain.com
+    service: http://127.0.0.1:11436
+  - service: http_status:404

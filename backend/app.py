@@ -28,6 +28,21 @@ ALLOWED_MODELS = {"openai/gpt-5-mini", "local/biolvlm-8b-grpo"}
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "biovlm:latest")
 
+# Cloudflare Access credentials for BioVLM (only needed when BioVLM is
+# behind CF Tunnel on a remote server; leave empty for local dev)
+CF_BIOLVLM_CLIENT_ID = os.environ.get("CF_BIOLVLM_CLIENT_ID", "")
+CF_BIOLVLM_CLIENT_SECRET = os.environ.get("CF_BIOLVLM_CLIENT_SECRET", "")
+
+# Reusable httpx client that injects CF Access headers (None = no auth needed)
+import httpx as _httpx
+_biolvlm_http_client = (
+    _httpx.AsyncClient(headers={
+        "CF-Access-Client-Id": CF_BIOLVLM_CLIENT_ID,
+        "CF-Access-Client-Secret": CF_BIOLVLM_CLIENT_SECRET,
+    })
+    if CF_BIOLVLM_CLIENT_ID else None
+)
+
 # ServerlessLLM imports
 SLLM_AVAILABLE = False
 try:
@@ -477,9 +492,13 @@ async def forward_to_openai(provider: str, model_name: str, request: ChatComplet
 
 
 async def forward_to_ollama(request: ChatCompletionRequest):
-    """Forward request to local Ollama instance."""
+    """Forward request to local Ollama instance (supports remote via CF Tunnel)."""
     import openai
-    client = openai.AsyncOpenAI(base_url=f"{OLLAMA_BASE_URL}/v1", api_key="ollama")
+    client = openai.AsyncOpenAI(
+        base_url=f"{OLLAMA_BASE_URL}/v1",
+        api_key="ollama",
+        **(_biolvlm_http_client and {"http_client": _biolvlm_http_client} or {}),
+    )
 
     # Convert messages to dicts
     ollama_messages = []
