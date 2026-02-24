@@ -23,3 +23,17 @@ node_modules/
 
 # OS specific
 .DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Task management
+.taskmaster/
+
+# Test images
+image.png
+
+# Local docs/plans
+docs/
